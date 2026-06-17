@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cesium 气象云体渲染 - Voxel 体渲染</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body, html { width: 100%; height: 100%; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #0a1020; }
+  #cesiumContainer { width: 100%; height: 100%; }
+  .cesium-widget-credits, .cesium-credit-logoContainer, .cesium-credit-textContainer { display: none !important; }
+  #toolbar {
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
+    background: rgba(10,16,28,0.92);
+    border: 1px solid rgba(80,180,255,0.3);
+    border-radius: 10px; padding: 14px 16px;
+    color: #d0dff0; min-width: 240px;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  }
+  #toolbar h3 {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.5px;
+    color: #50b4ff; margin-bottom: 10px;
+    border-bottom: 1px solid rgba(80,180,255,0.2); padding-bottom: 8px;
+  }
+  #toolbar label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; margin: 5px 0; color: #a0b8d0; cursor: pointer; user-select: none;
+  }
+  #toolbar input[type="range"] {
+    flex: 1; height: 4px; cursor: pointer;
+    -webkit-appearance: none; background: rgba(80,180,255,0.2);
+    border-radius: 2px; outline: none; margin: 0;
+  }
+  #toolbar input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    border-radius: 50%; background: #50b4ff; cursor: pointer;
+    border: 2px solid #fff;
+  }
+  .val { color: #50b4ff; min-width: 40px; text-align: right; font-size: 11px; }
+  .row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+  .row label { margin: 0; flex: 1; }
+  .btn-group { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+  .btn {
+    flex: 1; padding: 5px 8px; border: 1px solid rgba(80,180,255,0.3);
+    background: rgba(20,50,90,0.6); color: #a0c0e0;
+    border-radius: 6px; cursor: pointer; font-size: 11px;
+    transition: all 0.15s; min-width: 65px; text-align: center;
+  }
+  .btn:hover { background: rgba(50,110,190,0.5); color: #fff; border-color: #50b4ff; }
+  .btn.active { background: rgba(30,90,170,0.7); color: #fff; border-color: #50b4ff; }
+  #legend {
+    position: absolute; bottom: 30px; right: 12px; z-index: 1000;
+    background: rgba(10,16,28,0.92); border: 1px solid rgba(80,180,255,0.25);
+    border-radius: 8px; padding: 10px 14px; backdrop-filter: blur(10px);
+  }
+  #legend h4 { font-size: 11px; color: #50b4ff; margin-bottom: 6px; letter-spacing: 0.5px; }
+  #legend canvas { display: block; border-radius: 3px; }
+  #legend .label-row { display: flex; justify-content: space-between; font-size: 10px; color: #90a8c0; margin-top: 3px; }
+  #info {
+    position: absolute; top: 12px; right: 12px; z-index: 1000;
+    background: rgba(10,16,28,0.92); border: 1px solid rgba(80,180,255,0.25);
+    border-radius: 8px; padding: 10px 14px;
+    color: #80a0c0; font-size: 11px; line-height: 1.8;
+    backdrop-filter: blur(10px); max-width: 240px;
+  }
+  #info b { color: #50b4ff; }
+  #loading {
+    position: absolute; inset: 0; z-index: 9999;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #0a1020; color: #50b4ff; font-size: 14px;
+    transition: opacity 0.8s;
+  }
+  #loading .spinner {
+    width: 44px; height: 44px; border: 3px solid rgba(80,180,255,0.15);
+    border-top-color: #50b4ff; border-radius: 50%;
+    animation: spin 0.9s linear infinite; margin-bottom: 16px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading.hidden { opacity: 0; pointer-events: none; }
+  #loading .status { margin-top: 8px; font-size: 12px; color: #70a0c0; }
+  .render-mode {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; margin: 8px 0; padding: 6px 8px;
+    background: rgba(30,60,100,0.4); border-radius: 6px;
+    border: 1px solid rgba(80,180,255,0.15);
+  }
+  .render-mode select {
+    flex: 1; padding: 4px 6px; border: 1px solid rgba(80,180,255,0.3);
+    background: rgba(10,20,40,0.8); color: #a0c0e0; border-radius: 4px;
+    font-size: 11px; cursor: pointer;
+  }
+  .render-mode select:focus { outline: none; border-color: #50b4ff; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  正在加载气象云数据...
+  <div class="status" id="loadStatus">初始化 Cesium</div>
+</div>
+
+<div id="cesiumContainer"></div>
+
+<!-- 控制面板 -->
+<div id="toolbar">
+  <h3>☁️ 气象云体渲染</h3>
+  
+  <div class="render-mode">
+    <label>渲染模式</label>
+    <select id="sldRenderMode">
+      <option value="voxel">体渲染 (Voxel)</option>
+      <option value="isosurface">等值面 (Marching Cubes)</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label>阈值</label>
+    <input type="range" id="sldThreshold" min="5" max="45" value="20">
+    <span class="val" id="lblThreshold">20 dBZ</span>
+  </div>
+  <div class="row">
+    <label>透明度</label>
+    <input type="range" id="sldAlpha" min="20" max="95" value="70">
+    <span class="val" id="lblAlpha">0.70</span>
+  </div>
+
+  <!-- 时间轴控制 -->
+  <div class="row" style="margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(80,180,255,0.2);">
+    <label>时间步</label>
+    <input type="range" id="sldTimeStep" min="0" max="23" value="0">
+    <span class="val" id="lblTimeStep">T+0</span>
+  </div>
+  <div class="row">
+    <label>动画速度</label>
+    <input type="range" id="sldAnimSpeed" min="1" max="20" value="5">
+    <span class="val" id="lblAnimSpeed">5x</span>
+  </div>
+
+  <div class="btn-group">
+    <button class="btn active" id="btnColorCloud" onclick="setColorScheme('cloud')">☁️ 云</button>
+    <button class="btn" id="btnColorRain" onclick="setColorScheme('rain')">🌧️ 降水</button>
+    <button class="btn" id="btnColorHeat" onclick="setColorScheme('heat')">🔥 热力</button>
+  </div>
+  <div class="btn-group">
+    <button class="btn" onclick="resetView()">🎯 重置视角</button>
+  </div>
+  <div class="btn-group">
+    <button class="btn" id="btnPlayPause" onclick="toggleAnimation()">▶️ 播放</button>
+    <button class="btn" onclick="resetTimeStep()">⏮️ 重置</button>
+  </div>
+</div>
+
+<!-- 图例 -->
+<div id="legend">
+  <h4 id="legendTitle">云层反射率 (dBZ)</h4>
+  <canvas id="legendCanvas" width="160" height="14"></canvas>
+  <div class="label-row"><span>0</span><span>60 dBZ</span></div>
+</div>
+
+<!-- 信息 -->
+<div id="info">
+  <b>Voxel 体渲染</b><br>
+  Cesium VoxelPrimitive<br>
+  左键旋转 · 右键平移 · 滚轮缩放
+</div>
+
+<script src="../Build/CesiumUnminified/Cesium.js"></script>
+<script>
+  // 强制测试模式 - 显示白色体素以便调试体渲染问题
+  window.TEST_VOXEL = 0;
+</script>
+<!-- Cesium 1.141 Unminified (可调试) -->
+<link href="../Build/CesiumUnminified/Widgets/widgets.css" rel="stylesheet">
+
+<script>
+// ================================================================
+//  Cesium 气象云体渲染 - Voxel Primitive 体渲染
+//  参考 Cesium Sandcastle voxels 示例
+// ================================================================
+
+'use strict';
+
+// Cesium Ion Token
+Cesium.Ion.defaultAccessToken = '';
+
+let viewer = null;
+let volData = null;
+let voxelPrimitive = null;
+let voxelProvider = null;  // 保存 provider 引用，用于更新数据
+let isoPrimitive = null;
+let currentRenderMode = 'voxel';
+let isoThreshold = 20;
+let globalAlpha = 0.70;
+let colorScheme = 'cloud';
+
+// 数据空间边界
+const DATA_BOUNDS = {
+  west: 114.75944408000001, east: 119.46389576,
+  south: 29.931233239999997, north: 33.55003108,
+  minH: 0, maxH: 20000
+};
+
+// 调试开关
+let VERBOSE_LOG = true;  // 动画时设为 false 减少日志
+
+// Voxel 边界
+const VOXEL_SHAPE_TYPE = Cesium.VoxelShapeType.BOX;
+
+// ================================================================
+//  时序动画状态
+// ================================================================
+let isAnimating = false;
+let animationSpeed = 5;  // 1-20
+let animationFrameId = null;
+let lastFrameTime = 0;
+let animationProgress = 0;  // 0~1 之间的插值进度
+
+// ================================================================
+//  颜色映射
+// ================================================================
+function getColor(value, maxVal = 60) {
+  const v = Math.max(0, Math.min(1, value / maxVal));
+  let r, g, b;
+
+  if (colorScheme === 'cloud') {
+    r = Math.round(180 + v * 75);
+    g = Math.round(200 + v * 55);
+    b = 255;
+  } else if (colorScheme === 'rain') {
+    if (v < 0.2)      { r = 0; g = 200; b = 0; }
+    else if (v < 0.4) { r = 0; g = 255; b = 0; }
+    else if (v < 0.5) { r = 128; g = 255; b = 0; }
+    else if (v < 0.6) { r = 255; g = 255; b = 0; }
+    else if (v < 0.7) { r = 255; g = 180; b = 0; }
+    else if (v < 0.8) { r = 255; g = 0; b = 0; }
+    else if (v < 0.9) { r = 180; g = 0; b = 100; }
+    else              { r = 180; g = 0; b = 180; }
+  } else {
+    if (v < 0.33)     { r = v * 3 * 200; g = 0; b = 0; }
+    else if (v < 0.66){ r = 200 + (v - 0.33) * 3 * 55; g = (v - 0.33) * 3 * 200; b = 0; }
+    else              { r = 255; g = 200 + (v - 0.66) * 3 * 55; b = (v - 0.66) * 3 * 255; }
+  }
+
+  return { r: Math.min(255, r), g: Math.min(255, g), b: Math.min(255, b) };
+}
+
+// ================================================================
+//  多时间步数据模拟
+// ================================================================
+const TIME_STEP_COUNT = 24;  // 增加到24个时间步，更平滑过渡
+let timeStepsData = [];     // 存储多个时间步的数据
+let currentTimeStep = 0;
+
+/**
+ * 从原始数据生成模拟的多时间步数据
+ * 只做强度值变化，不做位置平移，保证体素范围不变
+ */
+function generateTimeSteps(originalData) {
+  const { cols, rows, heights, values } = originalData;
+  const size = cols * rows * heights;
+  
+  console.log('生成多时间步数据...', TIME_STEP_COUNT, '步');
+  
+  timeStepsData = [];
+  
+  // 预生成噪声场（用于平滑演变）
+  const noiseField = new Float32Array(size);
+  for (let i = 0; i < size; i++) {
+    noiseField[i] = Math.random() * 2 - 1;  // -1 ~ 1
+  }
+  
+  for (let t = 0; t < TIME_STEP_COUNT; t++) {
+    const stepValues = new Float32Array(size);
+    
+    // 时间因子：周期性变化
+    const timePhase = t / TIME_STEP_COUNT;
+    const intensityWave = Math.sin(timePhase * Math.PI * 2);  // -1 ~ 1 周期变化
+    const growthFactor = 1 + intensityWave * 0.3;  // 0.7 ~ 1.3 强度缩放
+    const noiseWeight = 0.15 * Math.sin(timePhase * Math.PI);  // 噪声权重
+    
+    for (let k = 0; k < heights; k++) {
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const idx = k * rows * cols + j * cols + i;
+          
+          // 原始值
+          let val = values[idx];
+          
+          if (val > 0) {
+            // 强度周期变化
+            val *= growthFactor;
+            
+            // 添加平滑噪声扰动（模拟云的演变）
+            val += noiseField[idx] * noiseWeight * val;
+            
+            // 确保非负
+            val = Math.max(0, val);
+          }
+          
+          stepValues[idx] = val;
+        }
+      }
+    }
+    
+    timeStepsData.push(stepValues);
+  }
+  
+  console.log('多时间步数据生成完成，范围不变，仅强度变化');
+  return true;
+}
+
+/**
+ * 获取当前时间步的数据
+ */
+function getCurrentTimeStepData() {
+  if (timeStepsData.length === 0) return null;
+  return timeStepsData[currentTimeStep];
+}
+
+/**
+ * 获取插值后的数据（在两个时间步之间平滑过渡）
+ * @param {number} progress - 0~1 之间的插值进度
+ */
+/**
+ * 切换到下一个时间步
+ */
+function advanceTimeStep() {
+  currentTimeStep = (currentTimeStep + 1) % TIME_STEP_COUNT;
+  updateTimeStepUI();
+  
+  // 重新创建 VoxelPrimitive 以更新数据
+  if (currentRenderMode === 'voxel' && voxelPrimitive) {
+    createVoxelPrimitive();
+  }
+}
+
+/**
+ * 设置指定时间步
+ */
+function setTimeStep(step) {
+  currentTimeStep = Math.max(0, Math.min(TIME_STEP_COUNT - 1, step));
+  updateTimeStepUI();
+  
+  // 直接更新 Megatexture 数据
+  if (currentRenderMode === 'voxel') {
+    updateVoxelData();
+  }
+}
+
+/**
+ * 更新时间步 UI
+ */
+function updateTimeStepUI() {
+  document.getElementById('sldTimeStep').value = currentTimeStep;
+  document.getElementById('lblTimeStep').textContent = 'T+' + currentTimeStep;
+}
+
+/**
+ * 切换动画播放/暂停
+ */
+function toggleAnimation() {
+  if (isAnimating) {
+    stopAnimation();
+  } else {
+    startAnimation();
+  }
+}
+
+/**
+ * 开始动画 - 使用 requestAnimationFrame
+ */
+function startAnimation() {
+  isAnimating = true;
+  document.getElementById('btnPlayPause').textContent = '⏸️ 暂停';
+  lastFrameTime = performance.now();
+  animationProgress = 0;
+  VERBOSE_LOG = false;  // 减少动画时的日志输出
+  animationLoop();
+}
+
+/**
+ * 动画循环 - 使用 requestAnimationFrame
+ */
+function animationLoop() {
+  if (!isAnimating) return;
+  
+  const now = performance.now();
+  const deltaTime = now - lastFrameTime;
+  lastFrameTime = now;
+  
+  // 根据速度计算每步时间（速度1=1秒/步，速度20=0.05秒/步）
+  const stepDuration = 1000 / animationSpeed;  // ms
+  
+  // 更新进度
+  animationProgress += deltaTime / stepDuration;
+  
+  if (animationProgress >= 1) {
+    // 切换到下一个时间步
+    animationProgress = 0;
+    currentTimeStep = (currentTimeStep + 1) % TIME_STEP_COUNT;
+    updateTimeStepUI();
+    
+    // 直接更新 Megatexture 数据，避免重建 VoxelPrimitive
+    if (currentRenderMode === 'voxel') {
+      updateVoxelData();
+    }
+  }
+  
+  animationFrameId = requestAnimationFrame(animationLoop);
+}
+
+/**
+ * 停止动画
+ */
+function stopAnimation() {
+  isAnimating = false;
+  document.getElementById('btnPlayPause').textContent = '▶️ 播放';
+  
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+  
+  // 清理，恢复到当前时间步
+  animationProgress = 0;
+  VERBOSE_LOG = true;  // 恢复日志输出
+}
+
+/**
+ * 重置时间步
+ */
+function resetTimeStep() {
+  stopAnimation();
+  setTimeStep(0);
+}
+
+/**
+ * 设置动画速度
+ */
+function setAnimationSpeed(speed) {
+  animationSpeed = speed;
+  document.getElementById('lblAnimSpeed').textContent = speed + 'x';
+  
+  // 如果正在播放，重启动画以应用新速度
+  if (isAnimating) {
+    stopAnimation();
+    startAnimation();
+  }
+}
+
+// ================================================================
+//  自定义 VoxelProvider - 气象数据
+// ================================================================
+function createVoxelProvider(data) {
+  // 大幅降采样以适应 megatexture 限制 (目标 <5000 体素)
+  const sampleFactor = 4; // 每20个像素采样1个
+  const dims = {
+    x: Math.ceil(data.cols / sampleFactor),   // ~20
+    y: Math.ceil(data.rows / sampleFactor),  // ~20
+    z: Math.ceil(data.heights / 2)           // ~21
+  };
+
+  const statusEl = document.getElementById('loadStatus');
+  statusEl.textContent = '构建 VoxelProvider...';
+
+  // 获取当前时间步数据
+  const currentValues = getCurrentTimeStepData() || data.values;
+
+  // 预计算缩放后的数据
+  const voxelCount = dims.x * dims.y * dims.z;
+  const intensityData = new Float32Array(voxelCount);
+
+  let idx = 0;
+  for (let k = 0; k < dims.z; k++) {
+    for (let j = 0; j < dims.y; j++) {
+      for (let i = 0; i < dims.x; i++) {
+        // 原始数据索引
+        const srcI = Math.min(i * sampleFactor, data.cols - 1);
+        const srcJ = Math.min(j * sampleFactor, data.rows - 1);
+        const srcK = Math.min(k * 2, data.heights - 1); // 高度方向降采样因子2
+        const srcIdx = srcK * data.rows * data.cols + srcJ * data.cols + srcI;
+        intensityData[idx++] = currentValues[srcIdx];
+      }
+    }
+  }
+    const westRad = Cesium.Math.toRadians(DATA_BOUNDS.west);
+  const eastRad = Cesium.Math.toRadians(DATA_BOUNDS.east);
+  const southRad = Cesium.Math.toRadians(DATA_BOUNDS.south);
+  const northRad = Cesium.Math.toRadians(DATA_BOUNDS.north);
+
+  // globalTransform: 使用 Cesium 内置 ENU→ECEF 变换 + 缩放
+  //
+  // 【关键设计决策】
+  // 使用对称 bounds (-1,-1,-1)~(1,1,1) 而非 (0,0,0)~(1,1,1)
+  // 原因: Cesium 在 default bounds 时, getBoxChunkObb 的 OBB center 直接取自
+  //       matrix 的 translation (即 modelMatrix 把 Local(0,0,0) 映射到的 ECEF 点)
+  //       而非 matrix × midpoint(bounds)。
+  //
+  // 局部坐标系约定:
+  //   X = East 方向 (经度增大方向)
+  //   Y = North 方向 (纬度增大方向)
+  //   Z = Up 方向 (高度增大方向)
+  //
+  // 变换链: globalTransform = enuToEcef × scaleMat
+  //   Local(-1,-1,-1) → world: 地理范围西南下角 (110°E, 35°N, 100m)
+  //   Local(+1,+1,+1) → world: 地理范围东北上角 (120°E, 45°N, 15000m)
+  //   Local(0,0,0)    → world: 地理范围中心 (115°E, 40°N, 7550m)
+  //
+  const geoWidth = eastRad - westRad;   // 经度范围 (弧度)
+  const geoHeight = northRad - southRad; // 纬度范围 (弧度)
+  const altRange = DATA_BOUNDS.maxH - DATA_BOUNDS.minH; // 高度范围: 14900m
+  const altMid = (DATA_BOUNDS.maxH + DATA_BOUNDS.minH) / 2; // 高度中点: 7550m
+  const lonCenter = (westRad + eastRad) / 2;  // 115°
+  const latCenter = (southRad + northRad) / 2; // 40°
+  const R = Cesium.Ellipsoid.WGS84.maximumRadius; // 6378137m
+
+  // Step 1: ENU→ECEF 变换
+  // enuOrigin 放在地理中心 + altitude midpoint (7550m)
+  // 这样 Local(0,0,0) 映射到地理中心 (OBB center)
+  const enuOrigin = Cesium.Cartesian3.fromRadians(lonCenter, latCenter, altMid);
+  const enuToEcef = Cesium.Transforms.eastNorthUpToFixedFrame(enuOrigin);
+
+  // Step 2: 缩放矩阵 - 将对称单位立方体 [-1,1]³ 映射到地理尺寸
+  //
+  // 【关键修正】scaleMat 的缩放因子应该是 ENU 坐标系中的距离（米）
+  // 而不是简单的 R × 弧度范围！
+  //
+  // 对于 ENU 坐标系（原点在 115°E, 40°N, 7550m）:
+  //   - East 方向移动 x 米 → 经度变化 ≈ x / (R × cos(lat))
+  //   - North 方向移动 y 米 → 纬度变化 ≈ y / R
+  //
+  // 我们希望 Local(-1,0,0) 对应西边界 110°E（中心以西 5°）
+  // 所以 East 方向缩放因子 = 5° 对应的地表距离
+  //   eastScale = 5° × π/180 × R × cos(40°) ≈ 425 km
+  //
+  // 同理 North 方向 = 5° 对应的地表距离
+  //   northScale = 5° × π/180 × R ≈ 555 km
+  //
+  // Up 方向 = 高度半范围
+  //   upScale = 14900 / 2 = 7450 m
+  //
+  const halfLonRad = geoWidth / 2;   // 5° in radians
+  const halfLatRad = geoHeight / 2;  // 5° in radians
+  const halfAlt = altRange / 2;      // 7450m
+
+  const eastScale = R * halfLonRad * Math.cos(latCenter);  // ≈ 425 km
+  const northScale = R * halfLatRad;                       // ≈ 555 km
+  const upScale = halfAlt;                                 // ≈ 7.45 km
+
+  console.log('[Scale Factors]');
+  console.log('  East (ENU X):', (eastScale/1000).toFixed(1), 'km');
+  console.log('  North (ENU Y):', (northScale/1000).toFixed(1), 'km');
+  console.log('  Up (ENU Z):', (upScale/1000).toFixed(1), 'km');
+
+  const scaleMat = Cesium.Matrix4.fromScale(
+    new Cesium.Cartesian3(eastScale, northScale, upScale)
+  );
+
+  // Step 3: globalTransform = enuToEcef × scaleMat
+  // 对于 default bounds (-1,-1,-1)~(1,1,1):
+  //   OBB center = getTranslation(globalTransform) = enuOrigin ECEF = (115°, 40°, 7550m) ✓
+  //   halfExtents = scale = (R*geoWidth, R*geoHeight, altRange) ✓
+  let globalTransform = new Cesium.Matrix4();
+  Cesium.Matrix4.multiplyTransformation(enuToEcef, scaleMat, globalTransform);
+
+  // 调试输出
+  const gt = globalTransform;
+  console.log('[Voxel Transform Debug]');
+  console.log('  Matrix4 column-major:');
+  console.log('    Col0(East axis): [', gt[0].toFixed(0), gt[1].toFixed(0), gt[2].toFixed(0), gt[3].toFixed(0), ']');
+  console.log('    Col1(North axis): [', gt[4].toFixed(0), gt[5].toFixed(0), gt[6].toFixed(0), gt[7].toFixed(0), ']');
+  console.log('    Col2(Up axis): [', gt[8].toFixed(0), gt[9].toFixed(0), gt[10].toFixed(0), gt[11].toFixed(0), ']');
+  console.log('    Col3(Translation): [', gt[12].toFixed(0), gt[13].toFixed(0), gt[14].toFixed(0), gt[15].toFixed(0), ']');
+  console.log('  OBB center (getTranslation):', gt[12].toFixed(0), gt[13].toFixed(0), gt[14].toFixed(0), '(应≈center ECEF)');
+  console.log('  Scale (should match halfExtents):', eastScale.toFixed(0), '×', northScale.toFixed(0), '×', upScale.toFixed(0), 'm');
+  console.log('  HalfExtents:', (eastScale/1000).toFixed(1), '×', (northScale/1000).toFixed(1), '×', (upScale/1000).toFixed(1), 'km');
+
+  // 验证关键点
+  const verifyPts = [
+    { label: 'Local(0,0,0) center',   pt: Cesium.Matrix4.multiplyByPoint(globalTransform, new Cesium.Cartesian3(0, 0, 0), new Cesium.Cartesian3()) },
+    { label: 'Local(1,1,1) NE-top',  pt: Cesium.Matrix4.multiplyByPoint(globalTransform, new Cesium.Cartesian3(1, 1, 1), new Cesium.Cartesian3()) },
+    { label: 'Local(-1,-1,-1) SW-bot',pt: Cesium.Matrix4.multiplyByPoint(globalTransform, new Cesium.Cartesian3(-1, -1, -1), new Cesium.Cartesian3()) },
+  ];
+  for (const v of verifyPts) {
+    const c = Cesium.Cartographic.fromCartesian(v.pt);
+    console.log('  ' + v.label + ': ' +
+      Cesium.Math.toDegrees(c.longitude).toFixed(2) + '°E, ' +
+      Cesium.Math.toDegrees(c.latitude).toFixed(2) + '°N, ' +
+      c.height.toFixed(0) + 'm');
+  }
+
+  // VoxelProvider 类
+  function MeteorologyVoxelProvider() {
+    this.shape = VOXEL_SHAPE_TYPE;
+    // 使用对称 bounds (-1,-1,-1)~(1,1,1) 触发 Cesium default OBB path
+    // 这样 OBB center = getTranslation(globalTransform) = 地理中心
+    this.minBounds = new Cesium.Cartesian3(-1, -1, -1);
+    this.maxBounds = new Cesium.Cartesian3(1, 1, 1);
+    this.dimensions = new Cesium.Cartesian3(dims.x, dims.y, dims.z);
+    this.names = ['intensity'];
+    this.types = [Cesium.MetadataType.SCALAR];
+    this.componentTypes = [Cesium.MetadataComponentType.FLOAT32];
+    this.globalTransform = globalTransform;
+    this.availableLevels = 1;
+    this.intensityData = intensityData;
+
+    if (VERBOSE_LOG) console.log('VoxelProvider created, dims:', dims.x, dims.y, dims.z, 'voxelCount:', voxelCount);
+    let minVal = Infinity, maxVal = -Infinity, sumVal = 0, countVal = 0;
+    for (let i = 0; i < intensityData.length; i++) {
+      if (intensityData[i] > 0) {
+        if (intensityData[i] < minVal) minVal = intensityData[i];
+        if (intensityData[i] > maxVal) maxVal = intensityData[i];
+        sumVal += intensityData[i];
+        countVal++;
+      }
+    }
+    if (VERBOSE_LOG) console.log('Data range:', minVal.toFixed(1), '~', maxVal.toFixed(1), 'dBZ, non-zero:', countVal, '/', voxelCount);
+  }
+
+  MeteorologyVoxelProvider.prototype.requestData = function(options) {
+    if (VERBOSE_LOG) console.log('requestData called, tileLevel:', options.tileLevel);
+    
+    if (options.tileLevel >= 1) {
+      return Promise.reject('No tiles available beyond level 0');
+    }
+
+    try {
+      const dimensions = this.dimensions;
+      const channelCount = 1;
+      const voxelCount = dimensions.x * dimensions.y * dimensions.z;
+      if (VERBOSE_LOG) console.log('VoxelProvider requestData: voxelCount=', voxelCount);
+      
+      if (!this.intensityData) {
+        console.error('ERROR: intensityData is undefined!');
+        return Promise.reject('intensityData is undefined');
+      }
+      
+      const data = new Float32Array(voxelCount * channelCount);
+
+      // 复制数据
+      for (let i = 0; i < voxelCount; i++) {
+        data[i] = this.intensityData[i];
+      }
+
+      // 使用正确的 VoxelContent 构造函数而不是 fromMetadataArray
+      const content = new Cesium.VoxelContent({ metadata: [data] });
+      if (VERBOSE_LOG) console.log('VoxelContent created successfully');
+      return Promise.resolve(content);
+    } catch (err) {
+      console.error('requestData error:', err);
+      return Promise.reject(err);
+    }
+  };
+
+  return new MeteorologyVoxelProvider();
+}
+
+// ================================================================
+//  Custom Shader - 体积光照
+// ================================================================
+function createVolumeShader() {
+  return new Cesium.CustomShader({
+    fragmentShaderText: `
+      // 简化的3D噪声函数
+      float hash(vec3 p) {
+        p = fract(p * 0.3183099 + 0.1);
+        p *= 17.0;
+        return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+      }
+      
+      float noise(vec3 p) {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        
+        return mix(
+          mix(mix(hash(i + vec3(0,0,0)), hash(i + vec3(1,0,0)), f.x),
+              mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
+          mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x),
+              mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y),
+          f.z
+        );
+      }
+      
+      void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+        float intensity = fsInput.metadata.intensity;
+        
+        // 阈值处理 - 使用柔和边缘
+        float threshold = ${isoThreshold.toFixed(1)};
+        float softEdge = 5.0; // 柔和边缘宽度
+        float alphaBase = smoothstep(threshold - softEdge, threshold + softEdge, intensity);
+        
+        if (alphaBase < 0.01) {
+          material.alpha = 0.0;
+          return;
+        }
+        
+        // 归一化强度
+        float normalized = clamp((intensity - threshold) / (60.0 - threshold), 0.0, 1.0);
+        
+        // 颜色映射 (基于 colorScheme)
+        vec3 color;
+        ${getColorFunctionGLSL(colorScheme)}
+        
+        material.diffuse = color;
+        
+        // 体积透明度衰减
+        float transparency = ${(1 - globalAlpha).toFixed(2)};
+        float thickness = fsInput.voxel.travelDistance / 100000.0;
+        float alpha = 1.0 - pow(transparency, thickness);
+        
+        // 应用柔和边缘
+        material.alpha = alpha * ${globalAlpha.toFixed(2)} * alphaBase;
+      }
+    `
+  });
+}
+
+function getColorFunctionGLSL(scheme) {
+  // 使用纯数学函数，避免 if/else 链导致 GLSL 编译问题
+  if (scheme === 'cloud') {
+    return `
+      // 云色: 浅蓝到深蓝白 (纯数学)
+      float t = normalized;
+      color.r = 0.706 + t * 0.294;
+      color.g = 0.784 + t * 0.216;
+      color.b = 1.0;
+    `;
+  } else if (scheme === 'rain') {
+    return `
+      // 降水色: 绿-黄-红-紫 (纯数学插值)
+      float t = normalized;
+      vec3 c0 = vec3(0.0, 0.784, 0.0);   // 绿
+      vec3 c1 = vec3(0.502, 1.0, 0.0);   // 黄绿
+      vec3 c2 = vec3(1.0, 1.0, 0.0);     // 黄
+      vec3 c3 = vec3(1.0, 0.5, 0.0);     // 橙
+      vec3 c4 = vec3(1.0, 0.0, 0.0);     // 红
+      vec3 c5 = vec3(0.7, 0.0, 0.392);   // 品红
+      vec3 c6 = vec3(0.7, 0.0, 0.7);     // 紫
+      float s = t * 5.0;
+      float i = floor(s);
+      float f = fract(s);
+      if (i < 1.0) { color = mix(c0, c1, f); }
+      else if (i < 2.0) { color = mix(c1, c2, f); }
+      else if (i < 3.0) { color = mix(c2, c3, f); }
+      else if (i < 4.0) { color = mix(c3, c4, f); }
+      else { color = mix(c4, c5 + (c6 - c5) * f, f); }
+    `;
+  } else {
+    return `
+      // 热力色: 红-橙-黄 (纯数学)
+      float t = normalized;
+      color.r = 1.0;
+      color.g = clamp(t / 0.67, 0.0, 1.0) * 0.9;
+      color.b = max(0.0, (t - 0.67) / 0.33) * 1.0;
+    `;
+  }
+}
+
+// ================================================================
+//  创建 Voxel 体渲染
+// ================================================================
+function createVoxelPrimitive(forceRebuild = false) {
+  const statusEl = document.getElementById('loadStatus');
+  statusEl.textContent = '构建体渲染中...';
+
+  // 如果已存在且只是时间步变化，只更新数据
+  if (!forceRebuild && voxelPrimitive && voxelPrimitive._ready && voxelProvider) {
+    updateVoxelData();
+    return;
+  }
+
+  // 清理旧的（如果存在）
+  if (voxelPrimitive) {
+    viewer.scene.primitives.remove(voxelPrimitive);
+    voxelPrimitive = null;
+    voxelProvider = null;
+  }
+
+  voxelProvider = createVoxelProvider(volData);
+  
+  // 动态生成 shader
+  // 测试模式: 设置环境变量 TEST_VOXEL=1 来强制显示白色方块
+  const isTestMode = typeof window !== 'undefined' && window.TEST_VOXEL === 1;
+  
+  const shader = new Cesium.CustomShader({
+    fragmentShaderText: isTestMode ? `
+      void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+        material.diffuse = vec3(1.0, 1.0, 1.0);
+        material.alpha = 0.8;
+      }
+    ` : `
+      void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+        float intensity = fsInput.metadata.intensity;
+        
+        // 阈值处理 - 用 alpha 渐变代替 discard（避免编译问题）
+        float threshold = ${Math.max(0, isoThreshold - 15).toFixed(1)};
+        float rangeVal = 60.0 - threshold;
+        
+        // 归一化强度
+        float normalized = clamp((intensity - threshold) / rangeVal, 0.0, 1.0);
+        
+        // 阈值以下用 alpha 衰减，而不是 discard
+        float visibility = smoothstep(threshold - 5.0, threshold + 10.0, intensity);
+        
+        // 颜色映射
+        vec3 color;
+        ${getColorFunctionGLSL(colorScheme)}
+        
+        material.diffuse = color;
+        material.alpha = visibility * ${globalAlpha.toFixed(2)};
+      }
+    `
+  });
+
+  voxelPrimitive = viewer.scene.primitives.add(
+    new Cesium.VoxelPrimitive({
+      provider: voxelProvider,
+      customShader: shader
+    })
+  );
+
+  // 只在第一次创建时添加 voxelInspector
+  if (!viewer._voxelInspectorAdded) {
+    viewer.extend(Cesium.viewerVoxelInspectorMixin);
+    viewer._voxelInspectorAdded = true;
+  }
+  viewer.scene.debugShowFramesPerSecond = true;
+
+  // 飞向 voxel 包围球
+  // voxel 水平跨度 ~554km，所以需要足够远才能完整看到整个体素
+  // 用 600km 高度 + -30° 俯角，这样体素能完整显示在视锥体内
+  const centerLon = (DATA_BOUNDS.west + DATA_BOUNDS.east) / 2;
+  const centerLat = (DATA_BOUNDS.south + DATA_BOUNDS.north) / 2;
+  const centerAlt = (DATA_BOUNDS.maxH + DATA_BOUNDS.minH) / 2;
+  // viewer.camera.flyTo({
+  //   destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 600000), // voxel 上方 600km
+  //   orientation: {
+  //     heading: Cesium.Math.toRadians(0),
+  //     pitch: Cesium.Math.toRadians(-30), // 向下倾斜30度
+  //     roll: 0
+  //   },
+  //   duration: 0.0
+  // });
+
+  // 延迟后手动触发 scene.requestRender，确保 VoxelTraversal 重新评估
+  setTimeout(() => {
+    // 检查 VoxelPrimitive 状态
+    if (voxelPrimitive._ready !== undefined) {
+      console.log('VoxelPrimitive._ready:', voxelPrimitive._ready);
+    }
+    if (voxelPrimitive._shapeVisible !== undefined) {
+      console.log('VoxelPrimitive._shapeVisible:', voxelPrimitive._shapeVisible);
+    }
+    
+    // 强制请求渲染
+    viewer.scene.requestRender();
+    
+    // 再次延迟检查
+    setTimeout(() => {
+      viewer.scene.requestRender();
+    }, 500);
+  }, 1000);
+
+  statusEl.textContent = '体渲染完成';
+  
+  setTimeout(() => {
+    const el = document.getElementById('loading');
+    el.classList.add('hidden');
+    setTimeout(() => el.style.display = 'none', 800);
+  }, 500);
+}
+
+// ================================================================
+//  等值面渲染 (保留原有 MC 实现)
+// ================================================================
+
+const CUBE_VERTS = [
+  [0,0,0], [1,0,0], [1,1,0], [0,1,0],
+  [0,0,1], [1,0,1], [1,1,1], [0,1,1]
+];
+
+const CUBE_EDGES = [
+  [0,1], [1,2], [2,3], [3,0],
+  [4,5], [5,6], [6,7], [7,4],
+  [0,4], [1,5], [2,6], [3,7]
+];
+
+/**
+ * 直接更新 VoxelPrimitive 的体素数据，避免重建整个 Primitive
+ * 通过直接写入 Megatexture 实现
+ */
+function updateVoxelData() {
+  if (!voxelPrimitive || !voxelPrimitive._ready) {
+    console.warn('VoxelPrimitive 未就绪，无法更新数据');
+    return;
+  }
+
+  const statusEl = document.getElementById('loadStatus');
+  statusEl.textContent = '更新体素数据...';
+
+  // 获取当前时间步数据
+  const currentValues = getCurrentTimeStepData() || volData.values;
+
+  // 降采样参数（与 createVoxelProvider 一致）
+  const sampleFactor = 4;
+  const dims = voxelProvider.dimensions;
+  const voxelCount = dims.x * dims.y * dims.z;
+
+  // 构建新的体素数据
+  const newData = new Float32Array(voxelCount);
+  let idx = 0;
+  for (let k = 0; k < dims.z; k++) {
+    for (let j = 0; j < dims.y; j++) {
+      for (let i = 0; i < dims.x; i++) {
+        const srcI = Math.min(i * sampleFactor, volData.cols - 1);
+        const srcJ = Math.min(j * sampleFactor, volData.rows - 1);
+        const srcK = Math.min(k * 2, volData.heights - 1);
+        const srcIdx = srcK * volData.rows * volData.cols + srcJ * volData.cols + srcI;
+        newData[idx++] = currentValues[srcIdx];
+      }
+    }
+  }
+
+  // 更新 provider 的 intensityData
+  voxelProvider.intensityData = newData;
+
+  // 直接更新 Megatexture
+  try {
+    const traversal = voxelPrimitive._traversal;
+    if (traversal && traversal.megatextures && traversal.megatextures.length > 0) {
+      const megatexture = traversal.megatextures[0];  // intensity 通道
+      megatexture.writeDataToTexture(0, newData);
+      if (VERBOSE_LOG) console.log('Megatexture 数据已更新，时间步:', currentTimeStep);
+      viewer.scene.requestRender();
+    } else {
+      console.warn('_traversal.megatextures 不可用');
+    }
+  } catch (err) {
+    console.error('更新 Megatexture 失败:', err);
+  }
+
+  statusEl.textContent = '体渲染完成';
+}
+
+function generateMCTriTable() {
+  const table = [];
+  for (let i = 0; i < 256; i++) {
+    table[i] = [];
+    const edges = [];
+    for (let e = 0; e < 12; e++) {
+      const v1 = CUBE_VERTS[CUBE_EDGES[e][0]];
+      const v2 = CUBE_VERTS[CUBE_EDGES[e][1]];
+      const b1 = (i >> CUBE_EDGES[e][0]) & 1;
+      const b2 = (i >> CUBE_EDGES[e][1]) & 1;
+      if (b1 !== b2) {
+        edges.push(e);
+      }
+    }
+    if (edges.length >= 3) {
+      for (let t = 1; t < edges.length - 1; t++) {
+        table[i].push(edges[0], edges[t], edges[t + 1]);
+      }
+    }
+  }
+  return table;
+}
+
+const MC_TRI_TABLE = generateMCTriTable();
+
+function sampleVolume(lon, lat, alt) {
+  if (!volData) return -1;
+
+  const dLon = (DATA_BOUNDS.east - DATA_BOUNDS.west) / (volData.cols - 1);
+  const dLat = (DATA_BOUNDS.north - DATA_BOUNDS.south) / (volData.rows - 1);
+  const dH = (DATA_BOUNDS.maxH - DATA_BOUNDS.minH) / (volData.heights - 1);
+
+  const fi = (lon - DATA_BOUNDS.west) / dLon;
+  const fj = (DATA_BOUNDS.north - lat) / dLat;
+  const fk = (alt - DATA_BOUNDS.minH) / dH;
+
+  if (fi < 0 || fi >= volData.cols - 1 ||
+      fj < 0 || fj >= volData.rows - 1 ||
+      fk < 0 || fk >= volData.heights - 1) {
+    return -1;
+  }
+
+  const i0 = Math.floor(fi), j0 = Math.floor(fj), k0 = Math.floor(fk);
+  const tx = fi - i0, ty = fj - j0, tz = fk - k0;
+
+  const idx = (k, j, i) => k * volData.rows * volData.cols + j * volData.cols + i;
+
+  const v000 = volData.values[idx(k0, j0, i0)];
+  const v100 = volData.values[idx(k0, j0, i0 + 1)];
+  const v010 = volData.values[idx(k0, j0 + 1, i0)];
+  const v110 = volData.values[idx(k0, j0 + 1, i0 + 1)];
+  const v001 = volData.values[idx(k0 + 1, j0, i0)];
+  const v101 = volData.values[idx(k0 + 1, j0, i0 + 1)];
+  const v011 = volData.values[idx(k0 + 1, j0 + 1, i0)];
+  const v111 = volData.values[idx(k0 + 1, j0 + 1, i0 + 1)];
+
+  if (v000 < 0 || v100 < 0 || v010 < 0 || v110 < 0 ||
+      v001 < 0 || v101 < 0 || v011 < 0 || v111 < 0) return -1;
+
+  const c00 = v000 * (1 - tx) + v100 * tx;
+  const c01 = v001 * (1 - tx) + v101 * tx;
+  const c10 = v010 * (1 - tx) + v110 * tx;
+  const c11 = v011 * (1 - tx) + v111 * tx;
+
+  return (c00 * (1 - ty) + c10 * ty) * (1 - tz) + (c01 * (1 - ty) + c11 * ty) * tz;
+}
+
+function marchingCubes(threshold) {
+  if (!volData) return [];
+
+  const positions = [];
+  const colors = [];
+  const indices = [];
+
+  const resX = 50;
+  const resY = 50;
+  const resZ = 20;
+
+  const dLon = (DATA_BOUNDS.east - DATA_BOUNDS.west) / resX;
+  const dLat = (DATA_BOUNDS.north - DATA_BOUNDS.south) / resY;
+  const dH = (DATA_BOUNDS.maxH - DATA_BOUNDS.minH) / resZ;
+
+  let vertCount = 0;
+
+  for (let i = 0; i < resX; i++) {
+    for (let j = 0; j < resY; j++) {
+      for (let k = 0; k < resZ; k++) {
+        const lon0 = DATA_BOUNDS.west + i * dLon;
+        const lat0 = DATA_BOUNDS.north - j * dLat;
+        const h0 = DATA_BOUNDS.minH + k * dH;
+
+        const vals = [];
+        let validCount = 0;
+        let avgVal = 0;
+
+        for (let v = 0; v < 8; v++) {
+          const dv = CUBE_VERTS[v];
+          const val = sampleVolume(
+            lon0 + dv[0] * dLon,
+            lat0 - dv[1] * dLat,
+            h0 + dv[2] * dH
+          );
+          vals.push(val);
+          if (val >= 0) {
+            validCount++;
+            avgVal += val;
+          }
+        }
+
+        if (validCount < 4) continue;
+        avgVal /= validCount;
+
+        let cubeIndex = 0;
+        for (let v = 0; v < 8; v++) {
+          if (vals[v] >= threshold) cubeIndex |= (1 << v);
+        }
+
+        if (cubeIndex === 0 || cubeIndex === 255) continue;
+
+        const tris = MC_TRI_TABLE[cubeIndex];
+        if (!tris || tris.length < 3) continue;
+
+        const edgeVerts = [];
+        for (let e = 0; e < 12; e++) {
+          const [v1, v2] = CUBE_EDGES[e];
+          if ((vals[v1] >= threshold) !== (vals[v2] >= threshold)) {
+            const t = (threshold - vals[v1]) / (vals[v2] - vals[v1]);
+            const p1 = CUBE_VERTS[v1];
+            const p2 = CUBE_VERTS[v2];
+
+            edgeVerts[e] = {
+              lon: lon0 + (p1[0] + t * (p2[0] - p1[0])) * dLon,
+              lat: lat0 - (p1[1] + t * (p2[1] - p1[1])) * dLat,
+              h: h0 + (p1[2] + t * (p2[2] - p1[2])) * dH
+            };
+          }
+        }
+
+        for (let t = 0; t < tris.length; t += 3) {
+          const v0 = edgeVerts[tris[t]];
+          const v1 = edgeVerts[tris[t + 1]];
+          const v2 = edgeVerts[tris[t + 2]];
+
+          if (!v0 || !v1 || !v2) continue;
+
+          const p0 = Cesium.Cartesian3.fromDegrees(v0.lon, v0.lat, v0.h);
+          const p1c = Cesium.Cartesian3.fromDegrees(v1.lon, v1.lat, v1.h);
+          const p2c = Cesium.Cartesian3.fromDegrees(v2.lon, v2.lat, v2.h);
+
+          positions.push(p0.x, p0.y, p0.z);
+          positions.push(p1c.x, p1c.y, p1c.z);
+          positions.push(p2c.x, p2c.y, p2c.z);
+
+          const col = getColor(avgVal);
+          for (let c = 0; c < 3; c++) {
+            colors.push(col.r / 255, col.g / 255, col.b / 255, globalAlpha);
+          }
+
+          indices.push(vertCount, vertCount + 1, vertCount + 2);
+          vertCount += 3;
+        }
+      }
+    }
+  }
+
+  console.log(`MC: ${vertCount} vertices, ${vertCount / 3} triangles`);
+  return { positions, colors, indices };
+}
+
+function createIsoSurface() {
+  if (isoPrimitive) {
+    viewer.scene.primitives.remove(isoPrimitive);
+    isoPrimitive = null;
+  }
+
+  const statusEl = document.getElementById('loadStatus');
+  statusEl.textContent = '计算等值面...';
+
+  setTimeout(() => {
+    const { positions, colors, indices } = marchingCubes(isoThreshold);
+
+    if (positions.length === 0) {
+      statusEl.textContent = '未找到等值面，请降低阈值';
+      return;
+    }
+
+    const geometry = new Cesium.Geometry({
+      attributes: {
+        position: new Cesium.GeometryAttribute({
+          componentDatatype: Cesium.ComponentDatatype.DOUBLE,
+          componentsPerAttribute: 3,
+          values: new Float64Array(positions)
+        }),
+        color: new Cesium.GeometryAttribute({
+          componentDatatype: Cesium.ComponentDatatype.FLOAT,
+          componentsPerAttribute: 4,
+          values: new Float32Array(colors)
+        })
+      },
+      indices: new Uint32Array(indices),
+      primitiveType: Cesium.PrimitiveType.TRIANGLES,
+      boundingSphere: Cesium.BoundingSphere.fromVertices(positions)
+    });
+
+    isoPrimitive = viewer.scene.primitives.add(new Cesium.Primitive({
+      geometryInstances: new Cesium.GeometryInstance({ geometry }),
+      appearance: new Cesium.PerInstanceColorAppearance({
+        flat: false,
+        translucent: true,
+        renderState: {
+          depthTest: { enabled: true },
+          depthMask: false,
+          blending: Cesium.BlendingState.ALPHA_BLEND
+        }
+      }),
+      asynchronous: false
+    }));
+
+    statusEl.textContent = `等值面: ${(positions.length / 3)} 三角形`;
+
+    setTimeout(() => {
+      const el = document.getElementById('loading');
+      el.classList.add('hidden');
+      setTimeout(() => el.style.display = 'none', 800);
+    }, 300);
+  }, 50);
+}
+
+// ================================================================
+//  加载体数据
+// ================================================================
+async function loadVolumeData() {
+  const statusEl = document.getElementById('loadStatus');
+  statusEl.textContent = '下载气象数据...';
+
+  try {
+    const response = await fetch('./volume.json');
+    volData = await response.json();
+    DATA_BOUNDS.east = volData.xmax;
+    DATA_BOUNDS.west = volData.xmin;
+    DATA_BOUNDS.north = volData.ymax;
+    DATA_BOUNDS.south = volData.ymin;
+    DATA_BOUNDS.minH = volData.zmin;
+    DATA_BOUNDS.maxH = volData.zmax;
+    let minVal = Infinity, maxVal = -Infinity;
+    for (let i = 0; i < volData.values.length; i++) {
+      const v = volData.values[i];
+      if (v >= 0) {
+        if (v < minVal) minVal = v;
+        if (v > maxVal) maxVal = v;
+      }
+    }
+    console.log(`Volume: ${volData.cols}×${volData.rows}×${volData.heights}, Range: ${minVal.toFixed(1)}~${maxVal.toFixed(1)}`);
+    
+    // 生成多时间步数据
+    statusEl.textContent = '生成时间序列数据...';
+    generateTimeSteps(volData);
+    
+    statusEl.textContent = '数据加载完成';
+    return true;
+  } catch (err) {
+    console.error('Load failed:', err);
+    statusEl.textContent = '加载失败: ' + err.message;
+    return false;
+  }
+}
+
+// ================================================================
+//  初始化
+// ================================================================
+async function init() {
+  viewer = new Cesium.Viewer('cesiumContainer', {
+    baseLayerPicker: false,
+    geocoder: false,
+    animation: false,
+    timeline: false,
+    sceneModePicker: false,
+    navigationHelpButton: false,
+    homeButton: false,
+    fullscreenButton: false,
+    infoBox: false,
+    selectionIndicator: false,
+    skyAtmosphere: new Cesium.SkyAtmosphere(),
+    creditContainer: document.createElement('div')
+  });
+
+  viewer.scene.globe.enableLighting = false;
+
+  const centerLon = (DATA_BOUNDS.west + DATA_BOUNDS.east) / 2;
+  const centerLat = (DATA_BOUNDS.south + DATA_BOUNDS.north) / 2;
+  viewer.camera.setView({
+    destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 600000),
+    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-30), roll: 0 }
+  });
+
+  const success = await loadVolumeData();
+  if (success) {
+    if (currentRenderMode === 'voxel') {
+      createVoxelPrimitive();
+    } else {
+      createIsoSurface();
+    }
+    drawLegend();
+  }
+
+  setupControls();
+}
+
+// ================================================================
+//  控制
+// ================================================================
+let _rebuildTimer = null;
+
+function _scheduleRebuild() {
+  if (_rebuildTimer) clearTimeout(_rebuildTimer);
+  _rebuildTimer = setTimeout(() => {
+    _rebuildTimer = null;
+    if (currentRenderMode === 'voxel') {
+      createVoxelPrimitive(true);  // 强制重建（阈值/透明度/颜色变化）
+    } else {
+      createIsoSurface();
+    }
+  }, 300); // 300ms 防抖
+}
+
+function setupControls() {
+  document.getElementById('sldThreshold').addEventListener('input', e => {
+    isoThreshold = parseInt(e.target.value);
+    document.getElementById('lblThreshold').textContent = isoThreshold + ' dBZ';
+    _scheduleRebuild(); // 防抖重建
+  });
+
+  document.getElementById('sldAlpha').addEventListener('input', e => {
+    globalAlpha = parseInt(e.target.value) / 100;
+    document.getElementById('lblAlpha').textContent = globalAlpha.toFixed(2);
+    _scheduleRebuild(); // 防抖重建
+  });
+
+  // 时间步控制
+  document.getElementById('sldTimeStep').addEventListener('input', e => {
+    const step = parseInt(e.target.value);
+    setTimeStep(step);
+  });
+
+  // 动画速度控制
+  document.getElementById('sldAnimSpeed').addEventListener('input', e => {
+    const speed = parseInt(e.target.value);
+    setAnimationSpeed(speed);
+  });
+
+  document.getElementById('sldRenderMode').addEventListener('change', e => {
+    currentRenderMode = e.target.value;
+    
+    // 更新信息面板
+    const infoEl = document.getElementById('info');
+    if (currentRenderMode === 'voxel') {
+      infoEl.innerHTML = '<b>Voxel 体渲染</b><br>Cesium VoxelPrimitive<br>GPU 体光照散射<br>左键旋转 · 右键平移 · 滚轮缩放';
+      // 移除 iso inspector
+      if (viewer && viewer.voxelInspector) {
+        delete viewer.voxelInspector;
+      }
+    } else {
+      infoEl.innerHTML = '<b>等值面体渲染</b><br>Marching Cubes 算法<br>左键旋转 · 右键平移 · 滚轮缩放';
+    }
+
+    // 清除 loading 显示
+    const el = document.getElementById('loading');
+    el.classList.remove('hidden');
+    el.style.display = 'flex';
+
+    if (currentRenderMode === 'voxel') {
+      createVoxelPrimitive();
+    } else {
+      createIsoSurface();
+    }
+  });
+}
+
+function setColorScheme(scheme) {
+  colorScheme = scheme;
+  document.querySelectorAll('#toolbar .btn').forEach(btn => btn.classList.remove('active'));
+  document.getElementById('btnColor' + scheme.charAt(0).toUpperCase() + scheme.slice(1)).classList.add('active');
+
+  const titles = { cloud: '云层反射率 (dBZ)', rain: '降水强度 (dBZ)', heat: '热力值' };
+  document.getElementById('legendTitle').textContent = titles[scheme];
+
+  if (currentRenderMode === 'voxel') {
+    createVoxelPrimitive(true);  // 强制重建 shader
+  } else {
+    createIsoSurface();
+  }
+  drawLegend();
+}
+
+function resetView() {
+  const centerLon = (DATA_BOUNDS.west + DATA_BOUNDS.east) / 2;
+  const centerLat = (DATA_BOUNDS.south + DATA_BOUNDS.north) / 2;
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 600000),
+    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-30), roll: 0 },
+    duration: 1.5
+  });
+}
+
+function drawLegend() {
+  const canvas = document.getElementById('legendCanvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const grad = ctx.createLinearGradient(0, 0, w, 0);
+  for (let i = 0; i <= 20; i++) {
+    const t = i / 20;
+    const c = getColor(t * 60);
+    grad.addColorStop(t, `rgb(${c.r},${c.g},${c.b})`);
+  }
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
+}
+
+init();
+</script>
+</body>
+</html>

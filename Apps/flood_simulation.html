@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cesium 洪水演进模拟 - 物理扩散</title>
+  
+  <script src="../Build/CesiumUnminified/Cesium.js"></script>
+  <link href="../Build/CesiumUnminified/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: white; font-size: 18px; z-index: 10; background: rgba(0,0,0,0.5); padding: 15px 30px; border-radius: 8px; }
+    #infoPanel { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.75); color: white; padding: 12px 16px; border-radius: 8px; font-size: 13px; z-index: 10; min-width: 240px; backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.1); }
+    #infoPanel h3 { margin: 0 0 8px 0; font-size: 15px; color: #f90; }
+    #infoPanel p { margin: 4px 0; }
+    #infoPanel .badge { display: inline-block; background: rgba(255,150,50,0.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #f90; margin-right: 4px; }
+    #infoPanel .stat { color: #6cf; font-weight: bold; }
+    .controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; z-index: 10; flex-wrap: wrap; justify-content: center; }
+    .controls button { background: rgba(0,0,0,0.7); color: white; border: 1px solid rgba(255,255,255,0.2); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; backdrop-filter: blur(4px); }
+    .controls button:hover { background: rgba(255,150,50,0.3); border-color: #f90; }
+    .controls button.active { background: rgba(255,150,50,0.4); border-color: #f90; }
+    #stats { position: absolute; bottom: 70px; right: 10px; background: rgba(0,0,0,0.6); color: #aaa; padding: 6px 10px; border-radius: 4px; font-size: 11px; z-index: 10; font-family: monospace; }
+  </style>
+</head>
+<body>
+<div id="loading">🌊 加载 Cesium 洪水演进模拟...</div>
+<div id="cesiumContainer"></div>
+<div id="infoPanel">
+  <h3>🌊 洪水演进模拟 v2.0</h3>
+  <p><span class="badge">统一网格</span><span class="badge">平滑水面</span><span class="badge">物理扩散</span></p>
+  <p>🖱 <strong>点击地面</strong> 设置洪水源头</p>
+  <p>💧 水源数: <span class="stat" id="sourceCount">0</span></p>
+  <p>🌊 淹没面积: <span class="stat" id="floodArea">0</span> m²</p>
+  <p>📏 最深处: <span class="stat" id="maxDepth">0.0</span> m</p>
+  <p>⏱ 模拟时间: <span class="stat" id="simTime">0.0</span> s</p>
+</div>
+<div id="stats">FPS: --</div>
+<div class="controls">
+  <button id="btnPause" onclick="togglePause()">⏸ 暂停</button>
+  <button id="btnFlowRate" class="active" onclick="toggleFlowRate()">💧 快速</button>
+  <button onclick="resetFlood()">🔄 重置</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// 配置
+// ═══════════════════════════════════════════════════════════════════
+const CONFIG = {
+  gridSize: 40,
+  cellSize: 30.0,
+  flowSpeed: 0.30,
+  sourceRate: 8.0,
+  maxWater: 20.0,
+  evaporation: 0.0002,
+  obstacleHeight: 5.0,
+  viscosity: 0.01,
+  slopeFactor: 2.5,
+};
+
+let viewer = null;
+let floodSim = null;
+let isPaused = false;
+let fastMode = true;
+
+const EARTH_RADIUS = 6371000;
+
+// ═══════════════════════════════════════════════════════════════════
+// 洪水模拟
+// ═══════════════════════════════════════════════════════════════════
+class FloodSimulation {
+  constructor(viewer, centerLon, centerLat) {
+    this.viewer = viewer;
+    this.n = CONFIG.gridSize;
+    this.cellSize = CONFIG.cellSize;
+    this.centerLon = centerLon;
+    this.centerLat = centerLat;
+    
+    const cosLat = Math.cos(centerLat * Math.PI / 180);
+    this.halfWidth = (this.n * this.cellSize) / 2;
+    this.lonSpan = (this.halfWidth * 2) / (111320 * cosLat);
+    this.latSpan = (this.halfWidth * 2) / 111320;
+    
+    this.westLon = centerLon - this.lonSpan / 2;
+    this.southLat = centerLat - this.latSpan / 2;
+    this.eastLon = centerLon + this.lonSpan / 2;
+    this.northLat = centerLat + this.latSpan / 2;
+    
+    this.terrainHeight = [];
+    this.waterHeight = [];
+    this.obstacle = [];
+    this.flowOut = [];
+    this.sources = [];
+    this.initialized = false;
+    this.simTime = 0;
+    
+    // 网格中心经纬度
+    this.gridLon = [];
+    this.gridLat = [];
+    for (let j = 0; j < this.n; j++) {
+      this.gridLon[j] = []; this.gridLat[j] = [];
+      for (let i = 0; i < this.n; i++) {
+        this.gridLon[j][i] = this.westLon + (i + 0.5) * this.lonSpan / this.n;
+        this.gridLat[j][i] = this.southLat + (j + 0.5) * this.latSpan / this.n;
+      }
+    }
+    
+    this.waterPrimitive = null;
+    this.sourceEntities = [];
+    this.boundaryEntity = null;
+    this.lastFrameTime = performance.now();
+  }
+  
+  async initialize() {
+    for (let j = 0; j < this.n; j++) {
+      this.terrainHeight[j] = new Array(this.n).fill(0);
+      this.waterHeight[j] = new Array(this.n).fill(0);
+      this.obstacle[j] = new Array(this.n).fill(0);
+      this.flowOut[j] = new Array(this.n).fill(0);
+    }
+    
+    document.getElementById('loading').textContent = '🌊 采样地形数据... (0%)';
+    
+    try {
+      const tp = viewer.scene.terrainProvider;
+      if (!tp || !tp.availability) throw new Error('地形不可用');
+      
+      const cartos = [];
+      for (let j = 0; j < this.n; j++)
+        for (let i = 0; i < this.n; i++)
+          cartos.push(Cesium.Cartographic.fromDegrees(this.gridLon[j][i], this.gridLat[j][i]));
+      
+      const updated = await Cesium.sampleTerrain(tp, 11, cartos);
+      let idx = 0;
+      for (let j = 0; j < this.n; j++) {
+        for (let i = 0; i < this.n; i++) {
+          this.terrainHeight[j][i] = updated[idx].height !== undefined ? updated[idx].height : 0;
+          idx++;
+        }
+        if (j % 5 === 0)
+          document.getElementById('loading').textContent = `🌊 采样地形... (${Math.round(j/this.n*100)}%)`;
+      }
+      
+      console.log('地形范围:', Math.min(...this.terrainHeight.flat()).toFixed(1), '~', Math.max(...this.terrainHeight.flat()).toFixed(1));
+      
+      this.detectObstacles();
+      this.showBoundary();
+      
+      this.initialized = true;
+      document.getElementById('loading').style.display = 'none';
+      console.log('✅ 初始化完成');
+    } catch(e) {
+      console.error('❌', e);
+      for (let j = 0; j < this.n; j++)
+        for (let i = 0; i < this.n; i++)
+          this.terrainHeight[j][i] = 5 * Math.sin((i-this.n/2)*0.1) * Math.cos((j-this.n/2)*0.1);
+      this.detectObstacles();
+      this.showBoundary();
+      this.initialized = true;
+      document.getElementById('loading').style.display = 'none';
+    }
+  }
+  
+  detectObstacles() {
+    for (let j = 0; j < this.n; j++) {
+      for (let i = 0; i < this.n; i++) {
+        let s = 0; const h = this.terrainHeight[j][i];
+        if (j>0) s = Math.max(s, Math.abs(h-this.terrainHeight[j-1][i]));
+        if (j<this.n-1) s = Math.max(s, Math.abs(h-this.terrainHeight[j+1][i]));
+        if (i>0) s = Math.max(s, Math.abs(h-this.terrainHeight[j][i-1]));
+        if (i<this.n-1) s = Math.max(s, Math.abs(h-this.terrainHeight[j][i+1]));
+        this.obstacle[j][i] = s > CONFIG.obstacleHeight ? 1 : 0;
+      }
+    }
+  }
+  
+  showBoundary() {
+    const pos = Cesium.Cartesian3.fromDegreesArray([
+      this.westLon, this.southLat,
+      this.eastLon, this.southLat,
+      this.eastLon, this.northLat,
+      this.westLon, this.northLat,
+      this.westLon, this.southLat,
+    ]);
+    this.boundaryEntity = viewer.entities.add({
+      polyline: { positions: pos, width: 1.5, material: new Cesium.Color(1,0.6,0,0.4), clampToGround: true }
+    });
+  }
+  
+  addSource(lon, lat, rate) {
+    if (!this.initialized) return false;
+    let md = Infinity, bj=-1, bi=-1;
+    for (let j=0;j<this.n;j++) for (let i=0;i<this.n;i++) {
+      if (this.obstacle[j][i]) continue;
+      const d = (this.gridLon[j][i]-lon)**2 + (this.gridLat[j][i]-lat)**2;
+      if (d<md) { md=d; bj=j; bi=i; }
+    }
+    if (bj<0) return false;
+    this.sources.push({j:bj,i:bi,rate:rate||CONFIG.sourceRate});
+    this.waterHeight[bj][bi] += 2.0;
+    this.addSourceMarker(this.gridLon[bj][bi], this.gridLat[bj][bi]);
+    document.getElementById('sourceCount').textContent = this.sources.length;
+    return true;
+  }
+  
+  addSourceMarker(lon, lat) {
+    const e = viewer.entities.add({
+      position: Cesium.Cartesian3.fromDegrees(lon, lat, 0),
+      billboard: {
+        image: createSourceIcon(),
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        scale: 0.7,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+      label: {
+        text: '💧',
+        font: '16px sans-serif',
+        fillColor: Cesium.Color.ORANGE,
+        outlineColor: Cesium.Color.BLACK,
+        outlineWidth: 1,
+        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        pixelOffset: new Cesium.Cartesian2(0, -30),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      }
+    });
+    this.sourceEntities.push(e);
+  }
+  
+  update(dt) {
+    if (!this.initialized || isPaused) return;
+    dt = Math.min(dt, 0.04);
+    if (fastMode) dt *= 3.0;
+    this.simTime += dt;
+    
+    for (const src of this.sources)
+      this.waterHeight[src.j][src.i] = Math.min(this.waterHeight[src.j][src.i] + src.rate*dt, CONFIG.maxWater);
+    
+    this.computeFlow(dt);
+    this.rebuildWaterMesh();
+    this.updateStats();
+  }
+  
+  computeFlow(dt) {
+    const n = this.n;
+    for (let j=0;j<n;j++) for (let i=0;i<n;i++) this.flowOut[j][i]=0;
+    
+    for (let j=0;j<n;j++) for (let i=0;i<n;i++) {
+      if (this.obstacle[j][i]) continue;
+      const w = this.waterHeight[j][i];
+      if (w < 0.001) continue;
+      const h = this.terrainHeight[j][i];
+      const total = h + w;
+      const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
+      for (const [di,dj] of dirs) {
+        const ni=i+di, nj=j+dj;
+        if (ni<0||ni>=n||nj<0||nj>=n) continue;
+        if (this.obstacle[nj][ni]) continue;
+        const nTotal = this.terrainHeight[nj][ni] + this.waterHeight[nj][ni];
+        if (total <= nTotal) continue;
+        const headDiff = total - nTotal;
+        const slope = Math.abs(h - this.terrainHeight[nj][ni]) / this.cellSize;
+        let flow = headDiff * CONFIG.flowSpeed * (1+slope*CONFIG.slopeFactor) * dt;
+        flow *= (1 - CONFIG.viscosity);
+        flow = Math.min(flow, w*0.3, CONFIG.maxWater*0.3);
+        if (flow > 0.001) { this.flowOut[j][i] += flow; this.flowOut[nj][ni] -= flow; }
+      }
+    }
+    
+    for (let j=0;j<n;j++) for (let i=0;i<n;i++) {
+      const net = this.flowOut[j][i];
+      if (Math.abs(net)>0.0001) { this.waterHeight[j][i] -= net; if (this.waterHeight[j][i]<0) this.waterHeight[j][i]=0; }
+      if (this.waterHeight[j][i]>0.001) {
+        this.waterHeight[j][i] *= (1-CONFIG.evaporation*dt);
+        if (this.waterHeight[j][i]<0.001) this.waterHeight[j][i]=0;
+      }
+    }
+  }
+  
+  // ─── 重建水面网格（统一顶点网格，相邻单元格共享顶点） ───
+  rebuildWaterMesh() {
+    const n = this.n;
+    const V = n + 1; // 每边顶点数
+    
+    // 水面高度网格（顶点级别）
+    const waterSurface = [];
+    const isFlooded = [];
+    for (let j = 0; j < V; j++) {
+      waterSurface[j] = [];
+      isFlooded[j] = [];
+      for (let i = 0; i < V; i++) {
+        // 找到相邻4个单元格的最大水深，保证水面连续
+        let maxW = 0;
+        let anyFlooded = false;
+        for (let dj = -1; dj <= 0; dj++) {
+          for (let di = -1; di <= 0; di++) {
+            const ci = Math.min(Math.max(i + di, 0), n - 1);
+            const cj = Math.min(Math.max(j + dj, 0), n - 1);
+            if (this.waterHeight[cj][ci] > 0.01 && !this.obstacle[cj][ci]) {
+              if (this.waterHeight[cj][ci] > maxW) maxW = this.waterHeight[cj][ci];
+              anyFlooded = true;
+            }
+          }
+        }
+        isFlooded[j][i] = anyFlooded;
+        const ti = Math.min(i, n - 1);
+        const tj = Math.min(j, n - 1);
+        waterSurface[j][i] = this.terrainHeight[tj][ti] + maxW;
+      }
+    }
+    
+    // 第一步：构建所有顶点
+    const positions = [];
+    const normals = [];
+    const colors = [];
+    
+    // 顶点索引查找表
+    const vertIdx = [];
+    for (let j = 0; j < V; j++) {
+      vertIdx[j] = [];
+      for (let i = 0; i < V; i++) {
+        if (isFlooded[j][i]) {
+          const lon = this.westLon + i * this.lonSpan / n;
+          const lat = this.southLat + j * this.latSpan / n;
+          const sh = waterSurface[j][i];
+          const pos = Cesium.Cartesian3.fromDegrees(lon, lat, sh);
+          vertIdx[j][i] = positions.length / 3;
+          positions.push(pos.x, pos.y, pos.z);
+        } else {
+          vertIdx[j][i] = -1;
+        }
+      }
+    }
+    
+    // 第二步：计算每个顶点的法线（基于水面坡度的中心差分）
+    const dLonRad = this.lonSpan * Math.PI / 180 / n;
+    const dLatRad = this.latSpan * Math.PI / 180 / n;
+    
+    for (let j = 0; j < V; j++) {
+      for (let i = 0; i < V; i++) {
+        if (!isFlooded[j][i]) continue;
+        
+        const sh = waterSurface[j][i];
+        // 中心差分（对于边界顶点使用单边差分）
+        let hE, hW, hN, hS;
+        if (i < n) hE = waterSurface[j][i+1]; else hE = sh;
+        if (i > 0) hW = waterSurface[j][i-1]; else hW = sh;
+        if (j < n) hN = waterSurface[j+1][i]; else hN = sh;
+        if (j > 0) hS = waterSurface[j-1][i]; else hS = sh;
+        
+        const vLat = (this.southLat + j * this.latSpan / n) * Math.PI / 180;
+        const cosVLat = Math.cos(vLat);
+        const de = EARTH_RADIUS * cosVLat * dLonRad;
+        const dn = EARTH_RADIUS * dLatRad;
+        
+        const dhde = (hE - hW) / (2 * de);
+        const dhdn = (hN - hS) / (2 * dn);
+        
+        // 切线空间法线
+        const tsLen = Math.sqrt(dhde*dhde + dhdn*dhdn + 1.0);
+        const nx_ts = -dhde / tsLen;
+        const ny_ts = -dhdn / tsLen;
+        const nz_ts = 1.0 / tsLen;
+        
+        // 转换到ECEF
+        const vLon = (this.westLon + i * this.lonSpan / n) * Math.PI / 180;
+        const cl = Math.cos(vLon), sl = Math.sin(vLon);
+        const cp = cosVLat, sp = Math.sin(vLat);
+        
+        const ex = -sl, ey = cl, ez = 0;
+        const nx_l = -sp*cl, ny_l = -sp*sl, nz_l = cp;
+        const ux = cp*cl, uy = cp*sl, uz = sp;
+        
+        let nx_e = ex*nx_ts + nx_l*ny_ts + ux*nz_ts;
+        let ny_e = ey*nx_ts + ny_l*ny_ts + uy*nz_ts;
+        let nz_e = ez*nx_ts + nz_l*ny_ts + uz*nz_ts;
+        const ecefLen = Math.sqrt(nx_e*nx_e + ny_e*ny_e + nz_e*nz_e);
+        normals.push(nx_e/ecefLen, ny_e/ecefLen, nz_e/ecefLen);
+        
+        // 颜色（基于水深）
+        // 从相邻单元格取最大水深
+        let maxW = 0;
+        for (let dj = -1; dj <= 0; dj++) {
+          for (let di = -1; di <= 0; di++) {
+            const ci = Math.min(Math.max(i + di, 0), n - 1);
+            const cj = Math.min(Math.max(j + dj, 0), n - 1);
+            if (this.waterHeight[cj][ci] > maxW) maxW = this.waterHeight[cj][ci];
+          }
+        }
+        
+        let cap = 0.001;
+        for (let jj=0;jj<n;jj++) for (let ii=0;ii<n;ii++)
+          if (this.waterHeight[jj][ii] > cap) cap = this.waterHeight[jj][ii];
+        cap = Math.min(CONFIG.maxWater, cap);
+        
+        const t = Math.min(maxW / Math.max(cap, 0.001), 1.0);
+        colors.push(0.08 - t*0.06, 0.35 - t*0.27, 0.55 - t*0.33, 0.65 + t*0.10);
+      }
+    }
+    
+    // 第三步：构建三角形索引（相邻顶点共享）
+    const indices = [];
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        // 检查此单元格的4个顶点是否都有水
+        const iBL = vertIdx[j][i];
+        const iBR = vertIdx[j][i+1];
+        const iTR = vertIdx[j+1][i+1];
+        const iTL = vertIdx[j+1][i];
+        
+        if (iBL < 0 || iBR < 0 || iTR < 0 || iTL < 0) continue;
+        
+        // 2个三角形: BL-BR-TL, BR-TR-TL
+        indices.push(iBL, iBR, iTL);
+        indices.push(iBR, iTR, iTL);
+      }
+    }
+    
+    if (indices.length === 0) {
+      if (this.waterPrimitive) {
+        viewer.scene.primitives.remove(this.waterPrimitive);
+        this.waterPrimitive = null;
+      }
+      return;
+    }
+    
+    const geometry = new Cesium.Geometry({
+      attributes: {
+        position: new Cesium.GeometryAttribute({
+          componentDatatype: Cesium.ComponentDatatype.DOUBLE,
+          componentsPerAttribute: 3,
+          values: new Float64Array(positions),
+        }),
+        normal: new Cesium.GeometryAttribute({
+          componentDatatype: Cesium.ComponentDatatype.FLOAT,
+          componentsPerAttribute: 3,
+          values: new Float32Array(normals),
+        }),
+        color: new Cesium.GeometryAttribute({
+          componentDatatype: Cesium.ComponentDatatype.FLOAT,
+          componentsPerAttribute: 4,
+          values: new Float32Array(colors),
+        }),
+      },
+      indices: new Uint32Array(indices),
+      primitiveType: Cesium.PrimitiveType.TRIANGLES,
+      boundingSphere: Cesium.BoundingSphere.fromVertices(positions),
+    });
+    
+    const appearance = new Cesium.PerInstanceColorAppearance({
+      translucent: true,
+      closed: false,
+    });
+    
+    if (this.waterPrimitive) {
+      viewer.scene.primitives.remove(this.waterPrimitive);
+    }
+    
+    this.waterPrimitive = new Cesium.Primitive({
+      geometryInstances: new Cesium.GeometryInstance({ geometry }),
+      appearance: appearance,
+      asynchronous: false,
+      compressVertices: false,
+      releaseGeometryInstances: false,
+    });
+    
+    viewer.scene.primitives.add(this.waterPrimitive);
+  }
+  
+  updateStats() {
+    let fc=0, md=0;
+    for (let j=0;j<this.n;j++) for (let i=0;i<this.n;i++) {
+      const w=this.waterHeight[j][i];
+      if (w>0.01) { fc++; if (w>md) md=w; }
+    }
+    document.getElementById('floodArea').textContent = (fc*this.cellSize*this.cellSize).toFixed(0);
+    document.getElementById('maxDepth').textContent = md.toFixed(1);
+    document.getElementById('simTime').textContent = this.simTime.toFixed(1);
+  }
+  
+  reset() {
+    for (let j=0;j<this.n;j++) for (let i=0;i<this.n;i++) { this.waterHeight[j][i]=0; this.flowOut[j][i]=0; }
+    this.sources=[]; this.simTime=0;
+    if (this.waterPrimitive) { viewer.scene.primitives.remove(this.waterPrimitive); this.waterPrimitive = null; }
+    for (const e of this.sourceEntities) viewer.entities.remove(e);
+    this.sourceEntities=[];
+    document.getElementById('sourceCount').textContent='0';
+    document.getElementById('floodArea').textContent='0';
+    document.getElementById('maxDepth').textContent='0.0';
+    document.getElementById('simTime').textContent='0.0';
+  }
+  
+  destroy() {
+    this.reset();
+    if (this.boundaryEntity) viewer.entities.remove(this.boundaryEntity);
+  }
+}
+
+function createSourceIcon() {
+  const c = document.createElement('canvas'); c.width=40; c.height=48;
+  const ctx=c.getContext('2d');
+  ctx.beginPath(); ctx.moveTo(20,4);
+  ctx.quadraticCurveTo(34,20,29,32); ctx.quadraticCurveTo(25,40,20,42);
+  ctx.quadraticCurveTo(15,40,11,32); ctx.quadraticCurveTo(6,20,20,4);
+  ctx.closePath(); ctx.fillStyle='#ff6600'; ctx.fill();
+  ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.stroke();
+  return c;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 交互（改进拾取：使用 pickPosition 读取深度缓冲）
+// ═══════════════════════════════════════════════════════════════════
+let msgTimeout = null;
+function showMessage(text) {
+  const el=document.getElementById('loading');
+  el.textContent=text; el.style.display='block'; el.style.background='rgba(255,100,50,0.3)';
+  if(msgTimeout) clearTimeout(msgTimeout);
+  msgTimeout=setTimeout(()=>{el.style.display='none';el.style.background='rgba(0,0,0,0.5)';},2000);
+}
+
+function setupInteraction() {
+  const canvas = viewer.scene.canvas;
+  
+  canvas.addEventListener('click', function(e) {
+    if (!floodSim||!floodSim.initialized) return;
+    const rect=canvas.getBoundingClientRect();
+    const mouse=new Cesium.Cartesian2(e.clientX-rect.left,e.clientY-rect.top);
+    
+    // 方法1：使用 pickPosition 从深度缓冲读取（更准确）
+    let cartesian;
+    if (viewer.scene.pickPositionSupported) {
+      cartesian = viewer.scene.pickPosition(mouse);
+    }
+    
+    // 方法2：如果 pickPosition 失败，使用 globe.pick（射线相交）
+    if (!cartesian) {
+      const ray = viewer.camera.getPickRay(mouse);
+      cartesian = viewer.scene.globe.pick(ray, viewer.scene);
+    }
+    
+    // 方法3：如果都失败，用椭球体pick（取近似值）
+    if (!cartesian) {
+      cartesian = viewer.camera.pickEllipsoid(mouse, viewer.scene.globe.ellipsoid);
+    }
+    
+    if (cartesian) {
+      const carto = Cesium.Cartographic.fromCartesian(cartesian);
+      const lon = Cesium.Math.toDegrees(carto.longitude);
+      const lat = Cesium.Math.toDegrees(carto.latitude);
+      
+      if (lon >= floodSim.westLon && lon <= floodSim.eastLon &&
+          lat >= floodSim.southLat && lat <= floodSim.northLat) {
+        floodSim.addSource(lon, lat);
+      } else {
+        showMessage('⚠️ 请在橙色边框区域内点击');
+      }
+    } else {
+      showMessage('⚠️ 无法获取点击位置，请点击有地形的区域');
+    }
+  });
+}
+
+function togglePause() { isPaused=!isPaused; document.getElementById('btnPause').textContent=isPaused?'▶ 播放':'⏸ 暂停'; }
+function toggleFlowRate() { fastMode=!fastMode; document.getElementById('btnFlowRate').classList.toggle('active'); document.getElementById('btnFlowRate').textContent=fastMode?'💧 快速':'🐢 正常'; }
+function resetFlood() { if(floodSim) floodSim.reset(); }
+
+// ═══════════════════════════════════════════════════════════════════
+// 主循环
+// ═══════════════════════════════════════════════════════════════════
+let frameCount=0, lastFpsTime=0;
+function mainLoop() {
+  try {
+    if(floodSim&&floodSim.initialized) {
+      const now=performance.now();
+      floodSim.update((now-floodSim.lastFrameTime)/1000);
+      floodSim.lastFrameTime=now;
+      frameCount++;
+      if(now-lastFpsTime>1000) {
+        document.getElementById('stats').textContent=`FPS:${frameCount}`;
+        frameCount=0; lastFpsTime=now;
+      }
+    }
+  } catch(e) { console.error('loop err:',e); }
+  requestAnimationFrame(mainLoop);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 初始化
+// ═══════════════════════════════════════════════════════════════════
+Cesium.Ion.defaultAccessToken = '';
+
+async function init() {
+  try {
+    const worldTerrain = await Cesium.Terrain.fromWorldTerrain({
+      requestWaterMask: true,
+      requestVertexNormals: true,
+    });
+    
+    viewer = new Cesium.Viewer('cesiumContainer', {
+      animation: false,
+      timeline: false,
+      baseLayerPicker: false,
+      fullscreenButton: false,
+      vrButton: false,
+      homeButton: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      geocoder: false,
+      infoBox: false,
+      terrain: worldTerrain,
+    });
+    
+    viewer.scene.globe.depthTestAgainstTerrain = false;
+    
+    const initLon = 121.48;
+    const initLat = 31.23;
+    
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(initLon, initLat, 3000),
+      orientation: {
+        heading: Cesium.Math.toRadians(0),
+        pitch: Cesium.Math.toRadians(-35),
+        roll: 0,
+      },
+    });
+    
+    document.getElementById('loading').textContent = '🌊 等待地形加载...';
+    
+    await new Promise(r => {
+      const rm = viewer.scene.globe.tileLoadProgressEvent.addEventListener(rem => {
+        if (rem === 0) { try { rm(); } catch(e) {} r(); }
+      });
+      setTimeout(() => { try { rm(); } catch(e) {} r(); }, 15000);
+    });
+    
+    floodSim = new FloodSimulation(viewer, initLon, initLat);
+    await floodSim.initialize();
+    
+    if (floodSim.initialized) {
+      setupInteraction();
+      floodSim.lastFrameTime = performance.now();
+      mainLoop();
+      setTimeout(() => {
+        if (floodSim && floodSim.initialized) floodSim.addSource(initLon, initLat + 0.006);
+      }, 1500);
+    }
+  } catch(e) {
+    console.error('❌ 初始化失败:', e);
+    document.getElementById('loading').innerHTML = '❌ 加载失败: ' + e.message;
+    document.getElementById('loading').style.color = '#ff6b6b';
+  }
+}
+
+init();
+</script>
+</body>
+</html>

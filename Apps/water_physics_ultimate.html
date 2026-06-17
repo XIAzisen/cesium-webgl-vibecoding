@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cesium 终极物理水面 - 动态涟漪效果</title>
+  
+  <script src="../Build/CesiumUnminified/Cesium.js"></script>
+  <link href="../Build/CesiumUnminified/Widgets/widgets.css" rel="stylesheet">
+  <style>
+    html, body, #cesiumContainer { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: white; font-size: 18px; z-index: 10; background: rgba(0,0,0,0.5); padding: 15px 30px; border-radius: 8px; }
+    #infoPanel { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.75); color: white; padding: 12px 16px; border-radius: 8px; font-size: 13px; z-index: 10; min-width: 220px; backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.1); }
+    #infoPanel h3 { margin: 0 0 8px 0; font-size: 15px; color: #6cf; }
+    #infoPanel p { margin: 4px 0; }
+    #infoPanel .badge { display: inline-block; background: rgba(100,200,255,0.2); padding: 2px 8px; border-radius: 4px; font-size: 11px; color: #6cf; margin-right: 4px; }
+    .controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 10; flex-wrap: wrap; justify-content: center; }
+    .controls button { background: rgba(0,0,0,0.7); color: white; border: 1px solid rgba(255,255,255,0.2); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.2s; backdrop-filter: blur(4px); }
+    .controls button:hover { background: rgba(50,150,255,0.3); border-color: #6cf; }
+    .controls button.active { background: rgba(50,150,255,0.4); border-color: #6cf; }
+    #stats { position: absolute; bottom: 80px; right: 10px; background: rgba(0,0,0,0.6); color: #aaa; padding: 6px 10px; border-radius: 4px; font-size: 11px; z-index: 10; font-family: monospace; }
+  </style>
+</head>
+<body>
+<div id="loading">🌊 加载 Cesium 终极物理水面...</div>
+<div id="cesiumContainer"></div>
+<div id="infoPanel">
+  <h3>🌊 终极物理水面模拟</h3>
+  <p><span class="badge">Gerstner波</span><span class="badge">物理涟漪</span><span class="badge">泡沫</span><span class="badge">焦散</span><span class="badge">SSS</span></p>
+  <p>🖱 <strong>点击</strong>水面产生涟漪 | <strong>拖拽</strong>连续涟漪</p>
+  <p>🌊 6层Gerstner波叠加 · 物理色散 · Fresnel反射</p>
+  <p id="rippleCount">涟漪数: 0</p>
+</div>
+<div id="stats">FPS: --</div>
+<div class="controls">
+  <button id="btnPause" onclick="toggleAnimation()">⏸ 暂停</button>
+  <button id="btnWind" class="active" onclick="toggleWind()">💨 风浪</button>
+  <button id="btnFoam" class="active" onclick="toggleFoam()">🫧 泡沫</button>
+  <button id="btnCaustic" class="active" onclick="toggleCaustic()">✨ 焦散</button>
+  <button onclick="resetWater()">🔄 重置</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// 配置参数
+// ═══════════════════════════════════════════════════════════════════
+const CONFIG = {
+  centerLon: 121.47,
+  centerLat: 31.2,
+  waterAlt: 0.0,
+  waterSize: 10000.0,
+  lonSpan: 0.1,
+  latSpan: 0.1,
+  
+  // Gerstner 波参数（6层）
+  waves: [
+    { amp: 2.5,  wl: 80.0,  speed: 1.5, dir: 0.0,        steepness: 0.25 },
+    { amp: 1.8,  wl: 55.0,  speed: 1.9, dir: Math.PI/5,  steepness: 0.22 },
+    { amp: 1.2,  wl: 38.0,  speed: 2.3, dir: Math.PI/2.5, steepness: 0.20 },
+    { amp: 0.9,  wl: 110.0, speed: 1.1, dir: -Math.PI/5, steepness: 0.18 },
+    { amp: 0.6,  wl: 28.0,  speed: 3.2, dir: Math.PI/7,  steepness: 0.15 },
+    { amp: 0.35, wl: 18.0,  speed: 4.5, dir: -Math.PI/4, steepness: 0.12 },
+  ],
+  
+  maxRipples: 6,
+  rippleDuration: 12.0,
+  rippleSpeed: 8.0,
+  rippleWavelength: 2.8,
+  rippleMaxAmp: 2.0,
+  
+  windEnabled: true,
+  windSpeed: 0.016,
+  windStrength: 1.0,
+  foamEnabled: true,
+  causticEnabled: true,
+};
+
+let viewer = null;
+let waterPrimitive = null;
+let animationPlaying = true;
+let timeUniform = 0.0;
+let rippleIndex = 0;
+let activeRippleCount = 0;
+let frameCount = 0;
+let lastFpsTime = 0;
+const ripples = [];
+
+// ═══════════════════════════════════════════════════════════════════
+// 构建 Fabric Material - 完全修复的 Shader
+// ═══════════════════════════════════════════════════════════════════
+function createWaterFabric() {
+  const uniforms = {
+    uTime: 0.0,
+    uBaseColor: new Cesium.Cartesian3(0/255, 45/255, 90/255),
+    uDeepColor: new Cesium.Cartesian3(0/255, 18/255, 55/255),
+    uSunDirection: new Cesium.Cartesian3(0.5, 0.3, 0.8),
+    uWindEnabled: 1.0,
+    uFoamEnabled: 1.0,
+    uCausticEnabled: 1.0,
+    uWindStrength: 1.0,
+  };
+  
+  // 涟漪 uniforms
+  for (let i = 0; i < CONFIG.maxRipples; i++) {
+    uniforms[`uRC${i}`] = new Cesium.Cartesian2(-1, -1);
+    uniforms[`uRT${i}`] = -1000.0;
+    uniforms[`uRA${i}`] = 0.0;
+  }
+  
+  // 构建涟漪调用 - 使用短名避免任何重载问题
+  let rippleCalls = '';
+  for (let i = 0; i < CONFIG.maxRipples; i++) {
+    rippleCalls += `    h += ripple_${i}(p);\n`;
+  }
+  
+  // 构建涟漪函数定义
+  let rippleFuncs = '';
+  for (let i = 0; i < CONFIG.maxRipples; i++) {
+    rippleFuncs += `
+    float ripple_${i}(vec2 p) {
+      vec2 c = uRC${i};
+      float t0 = uRT${i};
+      float amp = uRA${i};
+      if (t0 < 0.0) return 0.0;
+      float dt = uTime - t0;
+      if (dt < 0.0 || dt > ${CONFIG.rippleDuration.toFixed(1)}) return 0.0;
+      vec2 cw = (c - 0.5) * ${CONFIG.waterSize.toFixed(1)};
+      float d = distance(p, cw);
+      float wf = dt * ${CONFIG.rippleSpeed.toFixed(1)};
+      float a = amp * exp(-dt * 0.6) / (1.0 + wf * 0.02);
+      float wl = ${CONFIG.rippleWavelength.toFixed(1)};
+      float om = 2.0 * czm_pi / wl;
+      float env = exp(-pow(abs(d - wf) * 0.35, 2.0));
+      return a * env * sin(om * (d - wf));
+    }
+    `;
+  }
+  
+  const source = `
+    uniform float uTime;
+    uniform vec3 uBaseColor;
+    uniform vec3 uDeepColor;
+    uniform vec3 uSunDirection;
+    uniform float uWindEnabled;
+    uniform float uFoamEnabled;
+    uniform float uCausticEnabled;
+    uniform float uWindStrength;
+    
+    uniform vec2 uRC0; uniform float uRT0; uniform float uRA0;
+    uniform vec2 uRC1; uniform float uRT1; uniform float uRA1;
+    uniform vec2 uRC2; uniform float uRT2; uniform float uRA2;
+    uniform vec2 uRC3; uniform float uRT3; uniform float uRA3;
+    uniform vec2 uRC4; uniform float uRT4; uniform float uRA4;
+    uniform vec2 uRC5; uniform float uRT5; uniform float uRA5;
+    
+    // ---- 涟漪函数定义 ----
+    ${rippleFuncs}
+    
+    // ---- 噪声 ----
+    float hash21(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    }
+    float snoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash21(i);
+      float b = hash21(i + vec2(1.0, 0.0));
+      float c = hash21(i + vec2(0.0, 1.0));
+      float d = hash21(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float fbm4(vec2 p) {
+      float v = 0.0, a = 0.5, f = 1.0;
+      for (int i = 0; i < 4; i++) {
+        v += a * snoise(p * f);
+        f *= 2.0; a *= 0.5;
+      }
+      return v;
+    }
+    
+    // ---- Gerstner 波 ----
+    vec3 gerstner(vec2 p, float amp, float wl, float spd, float dir, float stp, float t) {
+      float k = 2.0 * czm_pi / wl;
+      float om = sqrt(9.81 * k);
+      float ph = k * (cos(dir) * p.x + sin(dir) * p.y) - om * t;
+      float c = cos(ph), s = sin(ph);
+      float Q = min(stp / (k * amp * 6.0), 0.8);
+      vec3 r;
+      r.x = Q * amp * cos(dir) * c;
+      r.y = Q * amp * sin(dir) * c;
+      r.z = amp * s;
+      return r;
+    }
+    
+    // ---- 总波浪高度 ----
+    float waveHeight(vec2 p, float t) {
+      float h = 0.0;
+      vec3 w;
+      w = gerstner(p, 2.5, 80.0, 1.5, 0.0, 0.25, t); h += w.z;
+      w = gerstner(p, 1.8, 55.0, 1.9, czm_pi/5.0, 0.22, t); h += w.z;
+      w = gerstner(p, 1.2, 38.0, 2.3, czm_pi/2.5, 0.20, t); h += w.z;
+      w = gerstner(p, 0.9, 110.0, 1.1, -czm_pi/5.0, 0.18, t); h += w.z;
+      w = gerstner(p, 0.6, 28.0, 3.2, czm_pi/7.0, 0.15, t); h += w.z;
+      w = gerstner(p, 0.35, 18.0, 4.5, -czm_pi/4.0, 0.12, t); h += w.z;
+      
+      if (uWindEnabled > 0.5) {
+        h += (fbm4(p * 0.005 + t * 0.3) - 0.5) * 0.3 * uWindStrength;
+      }
+      
+      // 涟漪调用
+      ${rippleCalls}
+      
+      return h;
+    }
+    
+    // ---- 法线计算 ----
+    vec3 calcNormal(vec2 p, float t, float eps) {
+      float hL = waveHeight(vec2(p.x - eps, p.y), t);
+      float hR = waveHeight(vec2(p.x + eps, p.y), t);
+      float hD = waveHeight(vec2(p.x, p.y - eps), t);
+      float hU = waveHeight(vec2(p.x, p.y + eps), t);
+      return normalize(vec3((hL - hR) / (2.0 * eps), (hD - hU) / (2.0 * eps), 1.0));
+    }
+    
+    // ---- 主材质 ----
+    czm_material czm_getMaterial(czm_materialInput input) {
+      czm_material mat = czm_getDefaultMaterial(input);
+      
+      vec2 st = input.st;
+      vec2 wp = (st - 0.5) * ${CONFIG.waterSize.toFixed(1)};
+      float t = uTime;
+      
+      float h = waveHeight(wp, t);
+      vec3 wn = calcNormal(wp, t, 0.5);
+      vec3 ne = normalize(czm_normal3D * wn);
+      mat.normal = ne;
+      
+      vec3 pe = input.positionToEyeEC;
+      vec3 vd = normalize(-pe);
+      
+      // Fresnel
+      float fr = pow(1.0 - max(dot(vd, ne), 0.0), 5.0);
+      fr = mix(0.02, 1.0, fr);
+      
+      // 天空反射
+      vec3 sky = mix(vec3(0.25, 0.45, 0.85), vec3(0.75, 0.85, 1.0), fr);
+      
+      // 水深混合
+      float df = smoothstep(-4.0, 4.0, h);
+      vec3 wc = mix(uDeepColor, uBaseColor, df);
+      
+      mat.diffuse = mix(wc, sky, fr * 0.65);
+      
+      // 泡沫
+      if (uFoamEnabled > 0.5) {
+        float foam = smoothstep(0.5, 1.0, h / 3.5);
+        float stp = 1.0 - dot(wn, vec3(0.0, 0.0, 1.0));
+        foam = max(foam, smoothstep(0.3, 0.8, stp) * 0.6);
+        foam *= smoothstep(0.0, 0.8, 1.0 - fr);
+        mat.diffuse = mix(mat.diffuse, vec3(0.92, 0.96, 1.0), foam * 0.55);
+      }
+      
+      // SSS 次表面散射
+      vec3 ld = normalize(uSunDirection);
+      float sss = pow(max(dot(vd, -ld), 0.0), 3.0) * (1.0 - fr);
+      mat.diffuse += vec3(sss) * 0.15 * vec3(0.2, 0.5, 0.3);
+      
+      // 高光
+      vec3 hd = normalize(ld + vd);
+      float sp = pow(max(dot(ne, hd), 0.0), 512.0);
+      mat.specular = 1.0;
+      mat.shininess = 512.0;
+      mat.diffuse += vec3(sp) * 3.0;
+      
+      // 焦散
+      if (uCausticEnabled > 0.5) {
+        float ca = pow(max(dot(ne, ld), 0.0), 12.0);
+        mat.diffuse += vec3(ca) * 0.12 * vec3(0.3, 0.6, 0.4);
+      }
+      
+      mat.alpha = mix(0.72, 0.93, fr);
+      
+      return mat;
+    }
+  `;
+  
+  return { uniforms, source };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 创建水面
+// ═══════════════════════════════════════════════════════════════════
+function createWaterSurface() {
+  const cosLat = Math.cos(CONFIG.centerLat * Math.PI / 180.0);
+  
+  const rectangle = new Cesium.RectangleGeometry({
+    rectangle: Cesium.Rectangle.fromDegrees(
+      CONFIG.centerLon - CONFIG.lonSpan / 2,
+      CONFIG.centerLat - CONFIG.latSpan / 2 / cosLat,
+      CONFIG.centerLon + CONFIG.lonSpan / 2,
+      CONFIG.centerLat + CONFIG.latSpan / 2 / cosLat
+    ),
+    height: CONFIG.waterAlt,
+    vertexFormat: Cesium.VertexFormat.POSITION_AND_ST
+  });
+  
+  const fabric = createWaterFabric();
+  
+  const appearance = new Cesium.MaterialAppearance({
+    material: new Cesium.Material({ fabric }),
+    translucent: true,
+    closed: false
+  });
+  
+  waterPrimitive = new Cesium.Primitive({
+    geometryInstances: new Cesium.GeometryInstance({ geometry: rectangle }),
+    appearance: appearance,
+    asynchronous: false
+  });
+  
+  viewer.scene.primitives.add(waterPrimitive);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 涟漪管理
+// ═══════════════════════════════════════════════════════════════════
+function addRipple(uvX, uvY, strength) {
+  const idx = rippleIndex % CONFIG.maxRipples;
+  
+  ripples[idx] = {
+    center: new Cesium.Cartesian2(uvX, uvY),
+    time: timeUniform,
+    amplitude: strength || CONFIG.rippleMaxAmp
+  };
+  
+  const mat = waterPrimitive.appearance.material;
+  mat.uniforms[`uRC${idx}`] = ripples[idx].center;
+  mat.uniforms[`uRT${idx}`] = timeUniform;
+  mat.uniforms[`uRA${idx}`] = ripples[idx].amplitude;
+  
+  rippleIndex = (rippleIndex + 1) % CONFIG.maxRipples;
+  updateRippleCount();
+}
+
+function updateRippleCount() {
+  let count = 0;
+  for (let i = 0; i < CONFIG.maxRipples; i++) {
+    if (ripples[i] && timeUniform - ripples[i].time < CONFIG.rippleDuration) {
+      count++;
+    }
+  }
+  activeRippleCount = count;
+  document.getElementById('rippleCount').textContent = `涟漪数: ${activeRippleCount}`;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 交互
+// ═══════════════════════════════════════════════════════════════════
+let isMouseDown = false;
+let lastRippleTime = 0;
+
+function setupInteraction() {
+  const canvas = viewer.scene.canvas;
+  
+  canvas.addEventListener('click', function(event) {
+    const pos = getPickPosition(event);
+    if (pos) addRipple(pos.uvX, pos.uvY, CONFIG.rippleMaxAmp);
+  });
+  
+  canvas.addEventListener('mousedown', function(event) {
+    isMouseDown = true;
+    const pos = getPickPosition(event);
+    if (pos) addRipple(pos.uvX, pos.uvY, CONFIG.rippleMaxAmp * 0.8);
+  });
+  
+  canvas.addEventListener('mousemove', function(event) {
+    if (!isMouseDown) return;
+    const now = performance.now();
+    if (now - lastRippleTime < 80) return;
+    lastRippleTime = now;
+    const pos = getPickPosition(event);
+    if (pos) addRipple(pos.uvX, pos.uvY, CONFIG.rippleMaxAmp * 0.3);
+  });
+  
+  canvas.addEventListener('mouseup', function() { isMouseDown = false; });
+  canvas.addEventListener('mouseleave', function() { isMouseDown = false; });
+  
+  canvas.addEventListener('touchstart', function(event) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    const pos = getPickPosition({ clientX: touch.clientX, clientY: touch.clientY });
+    if (pos) addRipple(pos.uvX, pos.uvY, CONFIG.rippleMaxAmp * 1.2);
+  }, { passive: false });
+  
+  canvas.addEventListener('touchmove', function(event) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    const now = performance.now();
+    if (now - lastRippleTime < 100) return;
+    lastRippleTime = now;
+    const pos = getPickPosition({ clientX: touch.clientX, clientY: touch.clientY });
+    if (pos) addRipple(pos.uvX, pos.uvY, CONFIG.rippleMaxAmp * 0.4);
+  }, { passive: false });
+}
+
+function getPickPosition(event) {
+  const rect = viewer.canvas.getBoundingClientRect();
+  const mouse = new Cesium.Cartesian2(
+    event.clientX - rect.left,
+    event.clientY - rect.top
+  );
+  
+  const ray = viewer.camera.getPickRay(mouse);
+  const position = viewer.scene.globe.pick(ray, viewer.scene);
+  
+  if (!position) return null;
+  
+  const cartographic = Cesium.Cartographic.fromCartesian(position);
+  const lon = Cesium.Math.toDegrees(cartographic.longitude);
+  const lat = Cesium.Math.toDegrees(cartographic.latitude);
+  
+  const cosLat = Math.cos(CONFIG.centerLat * Math.PI / 180.0);
+  const uvX = (lon - (CONFIG.centerLon - CONFIG.lonSpan / 2)) / CONFIG.lonSpan;
+  const uvY = (lat - (CONFIG.centerLat - CONFIG.latSpan / 2 / cosLat)) / (CONFIG.latSpan / cosLat);
+  
+  if (uvX >= 0 && uvX <= 1 && uvY >= 0 && uvY <= 1) {
+    return { uvX, uvY };
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 动画
+// ═══════════════════════════════════════════════════════════════════
+function setupAnimation() {
+  viewer.clock.onTick.addEventListener(function(clock) {
+    if (!animationPlaying) return;
+    timeUniform += CONFIG.windSpeed * CONFIG.windStrength;
+    if (waterPrimitive && waterPrimitive.appearance && waterPrimitive.appearance.material) {
+      waterPrimitive.appearance.material.uniforms.uTime = timeUniform;
+    }
+    
+    // FPS
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsTime > 1000) {
+      document.getElementById('stats').textContent = `FPS: ${frameCount} | 涟漪: ${activeRippleCount}`;
+      frameCount = 0;
+      lastFpsTime = now;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 控制
+// ═══════════════════════════════════════════════════════════════════
+function toggleAnimation() {
+  animationPlaying = !animationPlaying;
+  document.getElementById('btnPause').textContent = animationPlaying ? '⏸ 暂停' : '▶ 播放';
+}
+
+function toggleWind() {
+  CONFIG.windEnabled = !CONFIG.windEnabled;
+  document.getElementById('btnWind').classList.toggle('active');
+  if (waterPrimitive && waterPrimitive.appearance) {
+    waterPrimitive.appearance.material.uniforms.uWindEnabled = CONFIG.windEnabled ? 1.0 : 0.0;
+  }
+}
+
+function toggleFoam() {
+  CONFIG.foamEnabled = !CONFIG.foamEnabled;
+  document.getElementById('btnFoam').classList.toggle('active');
+  if (waterPrimitive && waterPrimitive.appearance) {
+    waterPrimitive.appearance.material.uniforms.uFoamEnabled = CONFIG.foamEnabled ? 1.0 : 0.0;
+  }
+}
+
+function toggleCaustic() {
+  CONFIG.causticEnabled = !CONFIG.causticEnabled;
+  document.getElementById('btnCaustic').classList.toggle('active');
+  if (waterPrimitive && waterPrimitive.appearance) {
+    waterPrimitive.appearance.material.uniforms.uCausticEnabled = CONFIG.causticEnabled ? 1.0 : 0.0;
+  }
+}
+
+function resetWater() {
+  for (let i = 0; i < CONFIG.maxRipples; i++) {
+    ripples[i] = null;
+    if (waterPrimitive && waterPrimitive.appearance) {
+      waterPrimitive.appearance.material.uniforms[`uRC${i}`] = new Cesium.Cartesian2(-1, -1);
+      waterPrimitive.appearance.material.uniforms[`uRT${i}`] = -1000.0;
+      waterPrimitive.appearance.material.uniforms[`uRA${i}`] = 0.0;
+    }
+  }
+  rippleIndex = 0;
+  activeRippleCount = 0;
+  updateRippleCount();
+  
+  timeUniform = 0.0;
+  if (waterPrimitive && waterPrimitive.appearance) {
+    waterPrimitive.appearance.material.uniforms.uTime = 0.0;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 初始化
+// ═══════════════════════════════════════════════════════════════════
+async function init() {
+  try {
+    document.getElementById('loading').style.display = 'none';
+    
+    viewer = new Cesium.Viewer('cesiumContainer', {
+      terrain: Cesium.Terrain.fromWorldTerrain(),
+      animation: false,
+      timeline: false,
+      baseLayerPicker: false,
+      fullscreenButton: false,
+      vrButton: false,
+      homeButton: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      geocoder: false,
+      infoBox: false
+    });
+    
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(CONFIG.centerLon, CONFIG.centerLat, 4500.0),
+      orientation: {
+        heading: Cesium.Math.toRadians(-20),
+        pitch: Cesium.Math.toRadians(-55),
+        roll: 0.0
+      }
+    });
+    
+    createWaterSurface();
+    setupAnimation();
+    setupInteraction();
+    
+    lastFpsTime = performance.now();
+    console.log('✅ 终极物理水面初始化完成 - 点击水面产生涟漪');
+    
+  } catch (error) {
+    console.error('❌ 初始化失败:', error);
+    document.getElementById('loading').innerText = '加载失败: ' + error.message;
+    document.getElementById('loading').style.color = '#ff6b6b';
+  }
+}
+
+init();
+</script>
+</body>
+</html>
